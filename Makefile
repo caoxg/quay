@@ -35,6 +35,7 @@ endif
 # Linux: GTK 3 + WebKitGTK 4.1 are available on more distributions than GTK 4 + WebKitGTK 6.
 ifeq ($(GOOS),linux)
   GUI_TAGS += gtk3
+  TEST_TAGS := -tags gtk3
 endif
 
 # $(call bundle,BINARY) wraps a macOS binary into dist/Quay.app and signs it ad hoc.
@@ -122,8 +123,8 @@ endif
 	@ls -1 dist
 
 test:
-	go vet ./...
-	go test ./internal/...
+	go vet $(TEST_TAGS) ./...
+	go test $(TEST_TAGS) ./internal/...
 	@if command -v node >/dev/null; then \
 	  for f in internal/gui/frontend/*.js; do node --input-type=module --check < $$f || { echo "syntax error in $$f"; exit 1; }; done; \
 	  echo "frontend: syntax ok"; \
