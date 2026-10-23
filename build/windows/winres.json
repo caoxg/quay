@@ -1,0 +1,53 @@
+{
+  "RT_GROUP_ICON": {
+    "APP": {
+      "0000": "../icon/icon-512.png"
+    }
+  },
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "io.github.caoxg.quay",
+          "version": ""
+        },
+        "description": "Quay",
+        "minimum-os": "win10",
+        "execution-level": "as invoker",
+        "ui-access": false,
+        "auto-elevate": false,
+        "dpi-awareness": "per monitor v2",
+        "disable-theming": false,
+        "disable-window-filtering": false,
+        "high-resolution-scrolling-aware": true,
+        "ultra-high-resolution-scrolling-aware": false,
+        "long-path-aware": true,
+        "printer-driver-isolation": false,
+        "gdi-scaling": false,
+        "segment-heap": false,
+        "use-common-controls-v6": true
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.0.0.0",
+          "product_version": "0.0.0.0"
+        },
+        "info": {
+          "0409": {
+            "Comments": "Arduino® is a trademark of Arduino S.r.l. Quay is an independent project.",
+            "CompanyName": "Xiaogang Cao",
+            "FileDescription": "Quay — deploy Arduino Apps from git to an Arduino® UNO Q",
+            "InternalName": "quay",
+            "LegalCopyright": "Copyright © 2026 Xiaogang Cao. Apache License 2.0.",
+            "OriginalFilename": "Quay.exe",
+            "ProductName": "Quay"
+          }
+        }
+      }
+    }
+  }
+}

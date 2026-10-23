@@ -1,0 +1,1021 @@
+//go:build !nogui
+
+package gui
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
+
+	"github.com/caoxg/quay/internal/board"
+	"github.com/caoxg/quay/internal/config"
+	"github.com/caoxg/quay/internal/core"
+	"github.com/caoxg/quay/internal/discover"
+	"github.com/caoxg/quay/internal/legal"
+	"github.com/caoxg/quay/internal/mirror"
+	"github.com/caoxg/quay/internal/profile"
+	"github.com/caoxg/quay/internal/relay"
+	"github.com/caoxg/quay/internal/source"
+	"github.com/caoxg/quay/internal/version"
+)
+
+// Service is what the frontend calls. Anything that can wait on the network or on the user runs
+// in the background and reports through "quay:op" events; methods here return quickly.
+type Service struct {
+	app *application.App
+
+	mu       sync.Mutex
+	sessions map[string]*core.Session
+	cache    map[string]cached
+	ops      map[string]context.CancelFunc
+	prompts  map[string]chan reply
+	bundles  map[string]*source.Bundle
+}
+
+type reply struct {
+	value string
+	ok    bool
+}
+
+// OpEvent is the payload of "quay:op".
+type OpEvent struct {
+	core.Event
+	Kind   string `json:"kind,omitempty"`
+	Board  string `json:"board,omitempty"`
+	Folder string `json:"folder,omitempty"`
+	Result any    `json:"result,omitempty"`
+	Error  string `json:"error,omitempty"`
+	Unsafe bool   `json:"unsafe,omitempty"` // refused by the app's safety probe; can be forced
+}
+
+// Prompt is the payload of "quay:prompt".
+type Prompt struct {
+	ID          string `json:"id"`
+	Kind        string `json:"kind"` // secret | hostkey
+	Title       string `json:"title"`
+	Message     string `json:"message"`
+	Host        string `json:"host,omitempty"`
+	KeyType     string `json:"keyType,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+}
+
+func newService() *Service {
+	return &Service{
+		sessions: map[string]*core.Session{},
+		cache:    map[string]cached{},
+		ops:      map[string]context.CancelFunc{},
+		prompts:  map[string]chan reply{},
+		bundles:  map[string]*source.Bundle{},
+	}
+}
+
+func id() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func (s *Service) emit(name string, data any) {
+	if s.app != nil {
+		s.app.Event.Emit(name, data)
+	}
+}
+
+// ---------------------------------------------------------------- sync calls
+
+// Info describes the app for the frontend.
+type Info struct {
+	Version      string             `json:"version"`
+	OS           string             `json:"os"`
+	Lang         string             `json:"lang"`
+	BackupsDir   string             `json:"backupsDir"`
+	Catalog      []*profile.Profile `json:"catalog"`
+	Mirror       string             `json:"mirror"`
+	DebianMirror string             `json:"debianMirror"`
+	Mirrors      []mirror.Mirror    `json:"mirrors"`  // mirrors in mainland China
+	Official     mirror.Mirror      `json:"official"` // the origin servers, for comparison
+	PublicKey    *PublicKey         `json:"publicKey"`
+}
+
+// PublicKey is this computer's SSH public key (~/.ssh/id_*.pub), if there is one.
+type PublicKey struct {
+	Path string `json:"path"`
+	Blob string `json:"blob"` // its base64 part, to compare with the board's authorized keys
+}
+
+// Licenses is Quay's own notice and the licenses of the third-party code compiled into it.
+type Licenses struct {
+	Notice     string `json:"notice"`
+	ThirdParty string `json:"thirdParty"`
+}
+
+func (s *Service) Licenses() Licenses {
+	return Licenses{Notice: legal.Notice, ThirdParty: legal.ThirdParty}
+}
+
+func (s *Service) Info() Info {
+	cfg, _ := config.Load()
+	lang := ""
+	if cfg != nil {
+		lang = cfg.Lang
+	}
+	var catalog []*profile.Profile
+	for _, p := range profile.Builtins() {
+		if p.Source != nil {
+			catalog = append(catalog, p)
+		}
+	}
+	info := Info{Version: version.Version, OS: runtime.GOOS, Lang: lang, BackupsDir: config.BackupsDir(), Catalog: catalog,
+		Mirror: core.DefaultMirror, DebianMirror: core.DefaultDebianMirror, Mirrors: mirror.China, Official: mirror.Official}
+	if path, line, err := board.LocalPublicKey(""); err == nil {
+		info.PublicKey = &PublicKey{Path: path, Blob: board.KeyBlob(line)}
+	}
+	return info
+}
+
+// BoardList is the saved boards plus the default.
+type BoardList struct {
+	Boards  []board.Target `json:"boards"`
+	Default string         `json:"default"`
+}
+
+func (s *Service) Boards() (BoardList, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return BoardList{}, err
+	}
+	if cfg.Boards == nil {
+		cfg.Boards = []board.Target{}
+	}
+	return BoardList{Boards: cfg.Boards, Default: cfg.Default}, nil
+}
+
+func normalizeTarget(t *board.Target) error {
+	switch t.Kind {
+	case board.KindSSH:
+		t.Host = strings.TrimSpace(t.Host)
+		if t.Host == "" {
+			return errors.New("enter the board's host name or IP address")
+		}
+		if t.User == "" {
+			t.User = "arduino"
+		}
+		if t.Port == 0 {
+			t.Port = 22
+		}
+	case board.KindADB:
+		t.Host, t.User, t.Port = "", "", 0
+	default:
+		return fmt.Errorf("unknown connection type %q", t.Kind)
+	}
+	return nil
+}
+
+// SaveBoard changes how a saved board is reached (address, user, key). Its name is the board's
+// hostname and does not change here (see Rename); new boards come in through AddBoard.
+func (s *Service) SaveBoard(t board.Target, oldName string, makeDefault bool) error {
+	if oldName == "" {
+		return errors.New("new boards are added with AddBoard")
+	}
+	if err := normalizeTarget(&t); err != nil {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	old, ok := cfg.Board(oldName)
+	if !ok {
+		return fmt.Errorf("no saved board %q", oldName)
+	}
+	t.Name, t.BoardID = old.Name, old.BoardID
+	if t.Host == old.Host {
+		t.LastIP = old.LastIP
+	}
+	cfg.Put(t)
+	if makeDefault || len(cfg.Boards) == 1 {
+		cfg.Default = t.Name
+	}
+	s.dropSession(oldName)
+	s.dropSession(t.Name)
+	return cfg.Save()
+}
+
+func (s *Service) RemoveBoard(name string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	cfg.Remove(name)
+	s.dropSession(name)
+	return cfg.Save()
+}
+
+func (s *Service) SetDefault(name string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	cfg.Default = name
+	return cfg.Save()
+}
+
+func (s *Service) SetLang(lang string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	cfg.Lang = lang
+	return cfg.Save()
+}
+
+// USBDevices lists boards connected over USB (adb).
+func (s *Service) USBDevices() ([]board.ADBDevice, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	list, err := board.ADBDevices(ctx)
+	if list == nil {
+		list = []board.ADBDevice{}
+	}
+	return list, err
+}
+
+// Respond answers a prompt.
+func (s *Service) Respond(promptID, value string, ok bool) {
+	s.mu.Lock()
+	ch := s.prompts[promptID]
+	delete(s.prompts, promptID)
+	s.mu.Unlock()
+	if ch != nil {
+		ch <- reply{value: value, ok: ok}
+	}
+}
+
+// Cancel stops a running operation.
+func (s *Service) Cancel(opID string) {
+	s.mu.Lock()
+	c := s.ops[opID]
+	s.mu.Unlock()
+	if c != nil {
+		c()
+	}
+}
+
+func (s *Service) Disconnect(name string) { s.dropSession(name) }
+
+// ---------------------------------------------------------------- dialogs & shell
+
+func (s *Service) PickBackup() (string, error) {
+	return s.app.Dialog.OpenFile().SetTitle("Choose a Quay backup").SetDirectory(config.BackupsDir()).
+		AddFilter("Quay backup (*.tgz)", "*.tgz").PromptForSingleSelection()
+}
+
+func (s *Service) PickExport(name string) (string, error) {
+	home, _ := os.UserHomeDir()
+	return s.app.Dialog.SaveFile().SetMessage("Save the App Lab zip").SetDirectory(filepath.Join(home, "Downloads")).
+		SetFilename(name).PromptForSingleSelection()
+}
+
+func (s *Service) PickFolder() (string, error) {
+	return s.app.Dialog.OpenFile().SetTitle("Choose an Arduino App folder").CanChooseDirectories(true).
+		CanChooseFiles(false).PromptForSingleSelection()
+}
+
+func (s *Service) PickKey() (string, error) {
+	home, _ := os.UserHomeDir()
+	return s.app.Dialog.OpenFile().SetTitle("Choose an SSH private key").SetDirectory(filepath.Join(home, ".ssh")).
+		ShowHiddenFiles(true).PromptForSingleSelection()
+}
+
+func (s *Service) OpenURL(u string) error {
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return errors.New("not a web address")
+	}
+	return s.app.Browser.OpenURL(u)
+}
+
+// Reveal shows a file (or folder) in the system file manager.
+func (s *Service) Reveal(path string) error {
+	if path == "" {
+		path = config.BackupsDir()
+		_ = os.MkdirAll(path, 0o755)
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", "-R", path).Start()
+	case "windows":
+		return exec.Command("explorer", "/select,", path).Start()
+	default:
+		if st, err := os.Stat(path); err == nil && !st.IsDir() {
+			path = filepath.Dir(path)
+		}
+		return exec.Command("xdg-open", path).Start()
+	}
+}
+
+// ---------------------------------------------------------------- prompter
+
+type prompter struct{ s *Service }
+
+func (p prompter) ask(ctx context.Context, pr Prompt) (reply, error) {
+	pr.ID = id()
+	ch := make(chan reply, 1)
+	p.s.mu.Lock()
+	p.s.prompts[pr.ID] = ch
+	p.s.mu.Unlock()
+	p.s.emit("quay:prompt", pr)
+	select {
+	case r := <-ch:
+		return r, nil
+	case <-ctx.Done():
+		p.s.mu.Lock()
+		delete(p.s.prompts, pr.ID)
+		p.s.mu.Unlock()
+		p.s.emit("quay:prompt-cancel", pr.ID)
+		return reply{}, ctx.Err()
+	}
+}
+
+func (p prompter) Secret(ctx context.Context, title, message string) (string, bool, error) {
+	r, err := p.ask(ctx, Prompt{Kind: "secret", Title: title, Message: message})
+	return r.value, r.ok, err
+}
+
+func (p prompter) TrustHostKey(ctx context.Context, host, keyType, fp string) (bool, error) {
+	r, err := p.ask(ctx, Prompt{Kind: "hostkey", Title: "New board", Message: host, Host: host, KeyType: keyType, Fingerprint: fp})
+	return r.ok, err
+}
+
+// ---------------------------------------------------------------- sessions
+
+func (s *Service) dropSession(name string) {
+	if name == "" {
+		return
+	}
+	s.mu.Lock()
+	sess := s.sessions[strings.ToLower(name)]
+	delete(s.sessions, strings.ToLower(name))
+	s.mu.Unlock()
+	if sess != nil {
+		_ = sess.Close()
+	}
+}
+
+func (s *Service) session(ctx context.Context, name string, sink core.Sink) (*core.Session, error) {
+	key := strings.ToLower(name)
+	s.mu.Lock()
+	sess := s.sessions[key]
+	s.mu.Unlock()
+	if sess != nil {
+		return sess, nil
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	t, ok := cfg.Board(name)
+	if !ok {
+		return nil, fmt.Errorf("no saved board %q", name)
+	}
+	sink(core.Event{Type: "step", Step: "connect", State: "run", Text: "Connect to " + t.String(), Time: time.Now().UnixMilli()})
+	sess, err = core.Connect(ctx, t, prompter{s}, config.KnownHostsFile())
+	if err != nil {
+		sink(core.Event{Type: "step", Step: "connect", State: "fail", Text: err.Error(), Time: time.Now().UnixMilli()})
+		return nil, err
+	}
+	sink(core.Event{Type: "step", Step: "connect", State: "ok", Text: "Connected to " + sess.T.Describe(), Time: time.Now().UnixMilli()})
+	s.mu.Lock()
+	s.sessions[key] = sess
+	s.mu.Unlock()
+	s.maybeRelay(ctx, sess)
+	return sess, nil
+}
+
+// maybeRelay starts relaying the board's downloads through this computer when the board has the
+// hook (Relay on). It lasts as long as the session: while the app is open and connected.
+func (s *Service) maybeRelay(ctx context.Context, sess *core.Session) {
+	out, err := board.Output(ctx, sess.T, "test -f /etc/apt/apt.conf.d/80quay-relay && echo yes || true")
+	if err != nil || strings.TrimSpace(out) != "yes" {
+		return
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	if up, err := relay.Upstream(cfg.RelayUpstream); err == nil {
+		_ = sess.StartRelay(&relay.Proxy{Upstream: up})
+	}
+}
+
+// learn keeps a saved board in step with the board: its name is its hostname, and its serial
+// number and address are remembered (config.Learn). It returns the board's name afterwards; the
+// session moves along when the name changes.
+func (s *Service) learn(name string, sess *core.Session, st *core.Status) string {
+	cfg, err := config.Load()
+	if err != nil {
+		return name
+	}
+	newName, changed := cfg.Learn(name, st.Hostname, st.Serial, st.PrimaryIP())
+	if !changed {
+		return newName
+	}
+	t, _ := cfg.Board(newName)
+	if t.Host != sess.Target.Host {
+		sess.TrustAs(t.Host, config.KnownHostsFile())
+	}
+	if cfg.Save() != nil {
+		return name
+	}
+	sess.Target = t
+	if !strings.EqualFold(newName, name) {
+		s.mu.Lock()
+		if s.sessions[strings.ToLower(name)] == sess {
+			delete(s.sessions, strings.ToLower(name))
+			s.sessions[strings.ToLower(newName)] = sess
+		}
+		s.mu.Unlock()
+	}
+	return newName
+}
+
+// connectionLost reports errors that mean the session must be re-opened.
+func connectionLost(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := err.Error()
+	for _, k := range []string{"EOF", "closed network connection", "broken pipe", "connection reset", "ssh session", "no route to host", "i/o timeout"} {
+		if strings.Contains(m, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// run starts a background operation and returns its id.
+func (s *Service) run(kind, boardName, folder string, fn func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error)) string {
+	opID := id()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.ops[opID] = cancel
+	s.mu.Unlock()
+	base := OpEvent{Kind: kind, Board: boardName, Folder: folder}
+	send := func(e OpEvent) {
+		e.Kind, e.Board, e.Folder = base.Kind, base.Board, base.Folder
+		e.Op = opID
+		if e.Time == 0 {
+			e.Time = time.Now().UnixMilli()
+		}
+		s.emit("quay:op", e)
+	}
+	sink := func(e core.Event) { send(OpEvent{Event: e}) }
+	send(OpEvent{Event: core.Event{Type: "begin"}})
+	go func() {
+		defer func() {
+			cancel()
+			s.mu.Lock()
+			delete(s.ops, opID)
+			s.mu.Unlock()
+			if r := recover(); r != nil {
+				send(OpEvent{Event: core.Event{Type: "end", State: "fail"}, Error: fmt.Sprint("internal error: ", r)})
+			}
+		}()
+		var sess *core.Session
+		var err error
+		if boardName != "" {
+			sess, err = s.session(ctx, boardName, sink)
+		}
+		var res any
+		if err == nil {
+			res, err = fn(ctx, sess, sink)
+			if connectionLost(err) && boardName != "" && ctx.Err() == nil {
+				s.dropSession(boardName) // stale connection: reconnect once and retry
+				if sess, err = s.session(ctx, boardName, sink); err == nil {
+					res, err = fn(ctx, sess, sink)
+				}
+			}
+		}
+		switch {
+		case err != nil && ctx.Err() != nil:
+			send(OpEvent{Event: core.Event{Type: "end", State: "cancel"}, Error: "cancelled"})
+		case err != nil:
+			var unsafe *core.UnsafeError
+			send(OpEvent{Event: core.Event{Type: "end", State: "fail"}, Error: err.Error(), Unsafe: errors.As(err, &unsafe)})
+		default:
+			send(OpEvent{Event: core.Event{Type: "end", State: "ok"}, Result: res})
+		}
+	}()
+	return opID
+}
+
+// ---------------------------------------------------------------- operations (return op ids)
+
+// BoardStatus is a board's status plus its saved name, which follows the board's hostname: when
+// Board differs from the name the frontend asked about, the board was renamed.
+type BoardStatus struct {
+	*core.Status
+	Board string `json:"board"`
+}
+
+func (s *Service) Status(boardName string) string {
+	return s.run("status", boardName, "", func(ctx context.Context, sess *core.Session, _ core.Sink) (any, error) {
+		st, err := sess.Status(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return BoardStatus{Status: st, Board: s.learn(boardName, sess, st)}, nil
+	})
+}
+
+// Found is a board found on the network, with the saved board it is, if any.
+type Found struct {
+	discover.Board
+	Saved string `json:"saved,omitempty"`
+}
+
+// Scan looks for boards on the local network.
+func (s *Service) Scan() string {
+	return s.run("scan", "", "", func(ctx context.Context, _ *core.Session, _ core.Sink) (any, error) {
+		found, err := discover.Browse(ctx, 2500*time.Millisecond)
+		if err != nil {
+			return nil, err
+		}
+		cfg, _ := config.Load()
+		out := []Found{}
+		for _, b := range found {
+			f := Found{Board: b}
+			if cfg != nil {
+				if t, ok := cfg.ByBoardID(b.Serial); ok {
+					f.Saved = t.Name
+				}
+			}
+			out = append(out, f)
+		}
+		return out, nil
+	})
+}
+
+// AddBoard connects to a board and saves it under its own name (its hostname). Adding a board that
+// is already saved (same serial number) updates its entry. uploadKey also uploads this computer's
+// SSH public key, so later connections need no password.
+func (s *Service) AddBoard(t board.Target, makeDefault, uploadKey bool) string {
+	return s.run("addboard", "", "", func(ctx context.Context, _ *core.Session, sink core.Sink) (any, error) {
+		if err := normalizeTarget(&t); err != nil {
+			return nil, err
+		}
+		sink(core.Event{Type: "step", Step: "connect", State: "run", Text: "Connect to " + t.String()})
+		sess, err := core.Connect(ctx, t, prompter{s}, config.KnownHostsFile())
+		if err != nil {
+			sink(core.Event{Type: "step", Step: "connect", State: "fail", Text: err.Error()})
+			return nil, err
+		}
+		sink(core.Event{Type: "step", Step: "connect", State: "ok", Text: "Connected to " + sess.T.Describe()})
+		st, err := sess.Status(ctx)
+		if err != nil {
+			sess.Close()
+			return nil, err
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			sess.Close()
+			return nil, err
+		}
+		if old, ok := cfg.ByBoardID(st.Serial); ok {
+			t.Name = old.Name
+		} else {
+			t.Name = cfg.UniqueName(st.Hostname, st.Serial)
+		}
+		cfg.Put(t)
+		name, _ := cfg.Learn(t.Name, st.Hostname, st.Serial, st.PrimaryIP())
+		if makeDefault || cfg.Default == "" {
+			cfg.Default = name
+		}
+		if err := cfg.Save(); err != nil {
+			sess.Close()
+			return nil, err
+		}
+		sess.Target, _ = cfg.Board(name)
+		if uploadKey {
+			if _, line, err := localOrNewKey(t.KeyFile, true); err == nil {
+				if _, err := sess.UploadKey(ctx, sink, line); err == nil {
+					st, _ = sess.Status(ctx) // shows the key as uploaded
+				}
+			}
+		}
+		s.dropSession(name)
+		s.mu.Lock()
+		s.sessions[strings.ToLower(name)] = sess
+		s.mu.Unlock()
+		s.maybeRelay(ctx, sess)
+		return BoardStatus{Status: st, Board: name}, nil
+	})
+}
+
+// MirrorTest measures, from the board, how the mirrors in mainland China and the official servers
+// serve it. Each result also arrives as an "info" event carrying it, as soon as it is in.
+func (s *Service) MirrorTest(boardName string) string {
+	return s.run("mirrortest", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return sess.TestMirrors(ctx, sink, append(append([]mirror.Mirror{}, mirror.China...), mirror.Official))
+	})
+}
+
+// KeyUpload is the result of UploadKey.
+type KeyUpload struct {
+	Path    string `json:"path"`
+	Added   bool   `json:"added"`
+	Created bool   `json:"created"` // the key pair was generated first
+}
+
+// UploadKey uploads this computer's SSH public key to the board (like ssh-copy-id). When there is
+// no key and generate is set, it first creates ~/.ssh/id_ed25519, as ssh-keygen would.
+func (s *Service) UploadKey(boardName string, generate bool) string {
+	return s.run("uploadkey", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		_, _, missing := board.LocalPublicKey(sess.Target.KeyFile)
+		path, line, err := localOrNewKey(sess.Target.KeyFile, generate)
+		if err != nil {
+			return nil, err
+		}
+		added, err := sess.UploadKey(ctx, sink, line)
+		return KeyUpload{Path: path, Added: added, Created: missing != nil}, err
+	})
+}
+
+// localOrNewKey is this computer's SSH public key, created first when there is none and generate
+// is set.
+func localOrNewKey(keyFile string, generate bool) (string, string, error) {
+	path, line, err := board.LocalPublicKey(keyFile)
+	if err != nil && generate {
+		return board.GenerateKey()
+	}
+	return path, line, err
+}
+
+// Rename renames the board itself (its hostname); the saved board follows.
+func (s *Service) Rename(boardName, newName string) string {
+	return s.run("rename", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		if err := sess.Rename(ctx, sink, newName); err != nil {
+			return nil, err
+		}
+		st, err := sess.Status(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return BoardStatus{Status: st, Board: s.learn(boardName, sess, st)}, nil
+	})
+}
+
+// SystemCheck lists the board's pending system updates; refresh runs apt-get update first.
+func (s *Service) SystemCheck(boardName string, refresh bool) string {
+	return s.run("syscheck", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return sess.CheckUpgrades(ctx, sink, refresh)
+	})
+}
+
+// SystemUpdate installs the board's system updates.
+func (s *Service) SystemUpdate(boardName string, opt core.UpgradeOptions) string {
+	return s.run("sysupdate", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return sess.Upgrade(ctx, sink, opt)
+	})
+}
+
+// RelayInfo is the relay's proxy setting on this computer.
+type RelayInfo struct {
+	Upstream  string `json:"upstream"`  // configured; empty = system settings
+	Effective string `json:"effective"` // what is used now; empty = direct
+	Error     string `json:"error,omitempty"`
+}
+
+// SetRelayUpstream changes the proxy the relay chains through; relays running now switch at once.
+func (s *Service) SetRelayUpstream(upstream string) (RelayInfo, error) {
+	upstream = strings.TrimSpace(upstream)
+	if _, err := relay.Upstream(upstream); err != nil {
+		return RelayInfo{}, err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return RelayInfo{}, err
+	}
+	cfg.RelayUpstream = upstream
+	if err := cfg.Save(); err != nil {
+		return RelayInfo{}, err
+	}
+	s.mu.Lock()
+	var running []*core.Session
+	for _, sess := range s.sessions {
+		if sess.RelayActive() {
+			running = append(running, sess)
+		}
+	}
+	s.mu.Unlock()
+	for _, sess := range running {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		sess.StopRelay()
+		s.maybeRelay(ctx, sess)
+		cancel()
+	}
+	return s.RelaySettings(), nil
+}
+
+func (s *Service) RelaySettings() RelayInfo {
+	cfg, err := config.Load()
+	if err != nil {
+		return RelayInfo{Error: err.Error()}
+	}
+	info := RelayInfo{Upstream: cfg.RelayUpstream}
+	up, err := relay.Upstream(cfg.RelayUpstream)
+	if err != nil {
+		info.Error = err.Error()
+	} else if up != nil {
+		info.Effective = up.String()
+	}
+	return info
+}
+
+// Relay turns the board's download relay on (with this computer's upstream proxy setting) or off.
+func (s *Service) Relay(boardName string, on bool, upstream string) string {
+	return s.run("relay", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		if on {
+			if _, err := relay.Upstream(upstream); err != nil {
+				return nil, err
+			}
+			cfg, err := config.Load()
+			if err != nil {
+				return nil, err
+			}
+			cfg.RelayUpstream = strings.TrimSpace(upstream)
+			if err := cfg.Save(); err != nil {
+				return nil, err
+			}
+			sess.StopRelay() // restart with the new upstream
+		}
+		if err := sess.Relay(ctx, sink, on); err != nil {
+			return nil, err
+		}
+		if on {
+			s.maybeRelay(ctx, sess)
+		} else {
+			sess.StopRelay()
+		}
+		return nil, nil
+	})
+}
+
+// Refs lists a repository's branches and tags.
+func (s *Service) Refs(repo string) string {
+	return s.run("refs", "", "", func(ctx context.Context, _ *core.Session, _ core.Sink) (any, error) {
+		return source.ListRefs(ctx, repo)
+	})
+}
+
+// InspectRequest names what to deploy.
+type InspectRequest struct {
+	Repo   string `json:"repo"`
+	Ref    string `json:"ref"`
+	Subdir string `json:"subdir"`
+	Dir    string `json:"dir"`
+}
+
+// Inspection is what the install dialog previews.
+type Inspection struct {
+	Key     string           `json:"key"`
+	Bundle  *source.Bundle   `json:"bundle"`
+	Profile *profile.Profile `json:"profile,omitempty"`
+	Folder  string           `json:"folder"`
+}
+
+// Inspect fetches the app on this computer and describes it (kept for Deploy).
+func (s *Service) Inspect(req InspectRequest) string {
+	return s.run("inspect", "", "", func(ctx context.Context, _ *core.Session, sink core.Sink) (any, error) {
+		b, err := core.Fetch(ctx, sink, config.RepoCacheDir(), core.FetchOptions{Repo: req.Repo, Ref: req.Ref, Subdir: req.Subdir, Dir: req.Dir})
+		if err != nil {
+			return nil, err
+		}
+		p, err := profile.Lookup(b.QuayYAML, b.Repo, b.App.Name)
+		if err != nil {
+			return nil, err
+		}
+		folder := b.Folder
+		if p != nil && p.Folder != "" {
+			folder = p.Folder
+		}
+		key := id()
+		s.mu.Lock()
+		s.bundles[key] = b
+		s.mu.Unlock()
+		return Inspection{Key: key, Bundle: b, Profile: p, Folder: folder}, nil
+	})
+}
+
+// DeployRequest deploys a bundle from Inspect.
+type DeployRequest struct {
+	Board  string `json:"board"`
+	Key    string `json:"key"`
+	Folder string `json:"folder"`
+	Start  bool   `json:"start"`
+	Backup bool   `json:"backup"`
+	Force  bool   `json:"force"`
+	Setup  bool   `json:"setup"`
+}
+
+func (s *Service) Deploy(req DeployRequest) string {
+	return s.run("deploy", req.Board, req.Folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		s.mu.Lock()
+		b := s.bundles[req.Key]
+		s.mu.Unlock()
+		if b == nil {
+			return nil, errors.New("the fetched app expired; check it again")
+		}
+		return sess.Deploy(ctx, sink, b, core.DeployOptions{Folder: req.Folder, Start: req.Start, Backup: req.Backup, Force: req.Force, Setup: req.Setup, BackupDir: config.BackupsDir()})
+	})
+}
+
+func (s *Service) Update(boardName, folder, ref string, force bool) string {
+	return s.run("update", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return sess.Update(ctx, sink, config.RepoCacheDir(), folder, ref, core.DeployOptions{Force: force, Backup: true, BackupDir: config.BackupsDir()})
+	})
+}
+
+func (s *Service) Start(boardName, folder string) string {
+	return s.run("start", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.Start(ctx, sink, folder)
+	})
+}
+
+func (s *Service) Stop(boardName, folder string, force bool) string {
+	return s.run("stop", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.Stop(ctx, sink, folder, force)
+	})
+}
+
+func (s *Service) Restart(boardName, folder string, force bool) string {
+	return s.run("restart", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.Restart(ctx, sink, folder, force)
+	})
+}
+
+// Autostart sets the boot app ("" = none).
+func (s *Service) Autostart(boardName, folder string) string {
+	return s.run("autostart", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.Autostart(ctx, sink, folder)
+	})
+}
+
+func (s *Service) Prepare(boardName, folder string, revert, force bool) string {
+	kind := "prepare"
+	if revert {
+		kind = "revert"
+	}
+	return s.run(kind, boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.Prepare(ctx, sink, folder, revert, force)
+	})
+}
+
+// Mirror sets ("" = restores) the board's PyPI mirror.
+// Mirror sets the PyPI and Debian mirrors; both empty restores the original configuration.
+func (s *Service) Mirror(boardName string, m core.MirrorOptions) string {
+	return s.run("mirror", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.Mirror(ctx, sink, m)
+	})
+}
+
+func (s *Service) Backup(boardName, folder string) string {
+	return s.run("backup", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return sess.Backup(ctx, sink, folder, config.BackupsDir())
+	})
+}
+
+func (s *Service) Restore(boardName, folder, file string, force bool) string {
+	return s.run("restore", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.Restore(ctx, sink, folder, file, force)
+	})
+}
+
+func (s *Service) Export(boardName, folder, path string) string {
+	return s.run("export", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		f, err := os.Create(path)
+		if err != nil {
+			return nil, err
+		}
+		err = sess.Export(ctx, sink, folder, f)
+		f.Close()
+		if err != nil {
+			os.Remove(path)
+			return nil, err
+		}
+		return path, nil
+	})
+}
+
+// EraseRequest mirrors core.EraseOptions.
+type EraseRequest struct {
+	Board        string `json:"board"`
+	Folder       string `json:"folder"`
+	Backup       bool   `json:"backup"`
+	Force        bool   `json:"force"`
+	RevertSystem bool   `json:"revertSystem"`
+}
+
+func (s *Service) Erase(req EraseRequest) string {
+	return s.run("erase", req.Board, req.Folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return sess.Erase(ctx, sink, req.Folder, core.EraseOptions{Backup: req.Backup, Force: req.Force, RevertSystem: req.RevertSystem, BackupDir: config.BackupsDir()})
+	})
+}
+
+// Logs streams an app's logs until cancelled (when follow is set).
+func (s *Service) Logs(boardName, folder string, follow bool, tail int) string {
+	return s.run("logs", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.Logs(ctx, sink, folder, follow, tail)
+	})
+}
+
+// UpdateInfo says whether an installed app's branch has moved on.
+type UpdateInfo struct {
+	Folder string `json:"folder"`
+	Repo   string `json:"repo"`
+	Ref    string `json:"ref,omitempty"`
+	Latest string `json:"latest"`
+	Behind bool   `json:"behind"`
+	// Commits is how many commits the installed version is behind (-1 when unknown).
+	Commits int `json:"commits"`
+	// Subject and Date describe the latest commit (GitHub only; empty elsewhere).
+	Subject string    `json:"subject,omitempty"`
+	Date    time.Time `json:"date,omitempty"`
+	// Unknown: the app was not installed by Quay, so its version is not known; the profile names
+	// the repository it comes from, and reinstalling through Quay makes updates trackable.
+	Unknown bool `json:"unknown,omitempty"`
+}
+
+type cached struct {
+	at time.Time
+	v  any
+}
+
+// remember caches slow lookups (git ls-remote, GitHub API) between the 30-second refreshes.
+func (s *Service) remember(key string, ttl time.Duration, fn func() (any, error)) (any, error) {
+	s.mu.Lock()
+	c, ok := s.cache[key]
+	s.mu.Unlock()
+	if ok && time.Since(c.at) < ttl {
+		return c.v, nil
+	}
+	v, err := fn()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.cache[key] = cached{time.Now(), v}
+	s.mu.Unlock()
+	return v, nil
+}
+
+// CheckUpdates compares each app with the latest commit of the branch it came from (no board
+// access): Quay-installed apps by their record, others by their profile's source repository.
+func (s *Service) CheckUpdates(apps []core.App) string {
+	return s.run("check-updates", "", "", func(ctx context.Context, _ *core.Session, _ core.Sink) (any, error) {
+		out := []UpdateInfo{}
+		for _, a := range apps {
+			u := UpdateInfo{Folder: a.Folder, Commits: -1}
+			switch {
+			case a.Deploy != nil && a.Deploy.Repo != "" && !strings.HasPrefix(a.Deploy.Repo, "local:"):
+				u.Repo, u.Ref = a.Deploy.Repo, a.Deploy.Ref
+			case a.Deploy == nil && a.Profile != nil && a.Profile.Source != nil && a.Profile.Source.Repo != "":
+				u.Repo, u.Ref, u.Unknown = a.Profile.Source.Repo, a.Profile.Source.Ref, true
+			default:
+				continue
+			}
+			v, err := s.remember("ref "+u.Repo+"@"+u.Ref, 5*time.Minute, func() (any, error) { return source.RemoteCommit(ctx, u.Repo, u.Ref) })
+			if err != nil || v.(string) == "" {
+				continue
+			}
+			u.Latest = v.(string)
+			base := ""
+			if !u.Unknown {
+				base = a.Deploy.Commit
+				u.Behind = u.Latest != base
+				if !u.Behind {
+					u.Commits = 0
+				}
+			}
+			if d, err := s.remember("commit "+u.Repo+" "+u.Latest+" "+base, time.Hour, func() (any, error) { return source.DescribeCommit(ctx, u.Repo, u.Latest, base) }); err == nil {
+				c := d.(*source.Commit)
+				u.Subject, u.Date = c.Subject, c.Date
+				if c.Ahead >= 0 {
+					u.Commits = c.Ahead
+				}
+			}
+			out = append(out, u)
+		}
+		return out, nil
+	})
+}

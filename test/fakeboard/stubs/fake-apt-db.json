@@ -1,0 +1,25 @@
+{
+ "installed": {
+  "arduino-app-cli": "0.13.0", "arduino-router": "0.10.0", "arduino-app-lab": "0.10.0",
+  "chromium": "143.0.7499.40-1~deb13u1", "chromium-common": "143.0.7499.40-1~deb13u1",
+  "bash": "5.2.37-2+b5", "libssl3t64": "3.5.1-1"
+ },
+ "packages": {
+  "arduino-app-cli": {"version": "0.14.0", "origin": "Arduino:stable", "size": 55386796,
+   "uri": "https://apt-repo.arduino.cc/pool/main/a/arduino-app-cli/arduino-app-cli_0.14.0-1_arm64.deb"},
+  "arduino-router": {"version": "0.11.0", "origin": "Arduino:stable", "size": 2091564,
+   "uri": "https://apt-repo.arduino.cc/pool/main/a/arduino-router/arduino-router_0.11.0-1_arm64.deb"},
+  "arduino-app-lab": {"version": "0.11.0", "origin": "Arduino:stable", "size": 186423376,
+   "uri": "https://apt-repo.arduino.cc/pool/main/a/arduino-app-lab/arduino-app-lab_0.11.0-1_arm64.deb"},
+  "chromium": {"version": "155.0.8059.79-1~deb13u1", "origin": "Debian-Security:13/stable-security", "size": 79167000,
+   "uri": "http://deb.debian.org/debian-security/pool/updates/main/c/chromium/chromium_155.0.8059.79-1%7edeb13u1_arm64.deb"},
+  "chromium-common": {"version": "155.0.8059.79-1~deb13u1", "origin": "Debian-Security:13/stable-security", "size": 36280000,
+   "uri": "http://deb.debian.org/debian-security/pool/updates/main/c/chromium/chromium-common_155.0.8059.79-1%7edeb13u1_arm64.deb"},
+  "bash": {"version": "5.2.37-2+b10", "origin": "Debian:13.7/stable", "size": 1456340,
+   "uri": "http://deb.debian.org/debian/pool/main/b/bash/bash_5.2.37-2%2bb10_arm64.deb"},
+  "libssl3t64": {"version": "3.5.4-1~deb13u1", "origin": "Debian-Security:13/stable-security", "size": 2400000,
+   "uri": "http://deb.debian.org/debian-security/pool/updates/main/o/openssl/libssl3t64_3.5.4-1%7edeb13u1_arm64.deb"},
+  "libfftw3-double3": {"version": "3.3.10-2+b1", "origin": "Debian:13.7/stable", "size": 336668, "new": "bash",
+   "uri": "http://deb.debian.org/debian/pool/main/f/fftw3/libfftw3-double3_3.3.10-2%2bb1_arm64.deb"}
+ }
+}

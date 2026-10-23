@@ -1,0 +1,8 @@
+#!/bin/bash
+# Stand-in for systemctl on the fake board: records calls, answers the few queries router-2m.sh makes.
+echo "$(id -un): systemctl $*" >> /var/log/fake-systemctl.log
+case "$1" in
+  cat) printf '[Service]\nExecStart=/usr/bin/arduino-router --serial-baudrate 115200\n' ;;
+  show) grep -h ExecStart= /etc/systemd/system/arduino-router.service.d/*.conf 2>/dev/null | tail -1 ;;
+esac
+exit 0

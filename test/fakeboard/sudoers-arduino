@@ -1,0 +1,5 @@
+# Like the UNO Q image (/etc/sudoers.d/90-arduino-sysupgrade and friends): a password for anything
+# else, but none for the system-update and board-naming commands App Lab runs.
+arduino ALL=(ALL) ALL
+arduino ALL=(ALL) NOPASSWD: /usr/bin/apt-get update, /usr/sbin/needrestart -r a, /usr/bin/dpkg --configure -a, /usr/bin/apt-get install --only-upgrade -y *, /usr/bin/apt-get clean -y, /usr/bin/hostnamectl set-hostname *
+arduino ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop avahi-daemon, /usr/bin/systemctl start avahi-daemon

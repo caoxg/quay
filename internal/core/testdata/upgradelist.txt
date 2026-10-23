@@ -1,0 +1,21 @@
+Inst bash [5.2.37-2+b5] (5.2.37-2+b10 Debian:13.7/stable [arm64])
+Inst libfftw3-double3 (3.3.10-2+b1 Debian:13.7/stable [arm64])
+Inst libde265-0 (1.0.15-1+deb13u2 Debian:13.7/stable, Debian-Security:13/stable-security [arm64])
+Inst chromium [143.0.7499.40-1~deb13u1] (155.0.8059.79-1~deb13u1 Debian-Security:13/stable-security [arm64]) []
+Inst chromium-common [143.0.7499.40-1~deb13u1] (155.0.8059.79-1~deb13u1 Debian-Security:13/stable-security [arm64])
+Inst firmware-qcom-dsp (0~20260916-2~bpo13+1 Debian Backports:stable-backports [all])
+Inst arduino-router [0.10.0] (0.11.0 Arduino:stable [arm64])
+Inst arduino-app-cli [0.13.0] (0.14.0 Arduino:stable [arm64])
+Inst arduino-app-lab [0.10.0] (0.11.0 Arduino:stable [arm64])
+QUAY_URIS
+'https://apt-repo.arduino.cc/pool/main/a/arduino-router/arduino-router_0.11.0-1_arm64.deb' arduino-router_0.11.0_arm64.deb 2091564 MD5Sum:0510c118e033ce9405078784528c2362
+'https://apt-repo.arduino.cc/pool/main/a/arduino-app-cli/arduino-app-cli_0.14.0-1_arm64.deb' arduino-app-cli_0.14.0_arm64.deb 55386796 MD5Sum:12b2532191da4221106d1929b5af7919
+'https://apt-repo.arduino.cc/pool/main/a/arduino-app-lab/arduino-app-lab_0.11.0-1_arm64.deb' arduino-app-lab_0.11.0_arm64.deb 186423376 MD5Sum:6aeb8f6d51054071dd64e1a19ff3da69
+'http://deb.debian.org/debian/pool/main/b/bash/bash_5.2.37-2%2bb10_arm64.deb' bash_5.2.37-2+b10_arm64.deb 1456340 MD5Sum:c53712fc129927eb5dc7ad53155930db
+'http://deb.debian.org/debian/pool/main/f/fftw3/libfftw3-double3_3.3.10-2%2bb1_arm64.deb' libfftw3-double3_3.3.10-2+b1_arm64.deb 336668 MD5Sum:8d97efaa7791ede667b284e47c3c00c3
+'http://deb.debian.org/debian/pool/main/libd/libde265/libde265-0_1.0.15-1%2bdeb13u2_arm64.deb' libde265-0_1.0.15-1+deb13u2_arm64.deb 153012 MD5Sum:77d37f215989fb3b43013f847908a441
+'http://deb.debian.org/debian-security/pool/updates/main/c/chromium/chromium_155.0.8059.79-1%7edeb13u1_arm64.deb' chromium_155.0.8059.79-1~deb13u1_arm64.deb 79116104 
+'http://deb.debian.org/debian-security/pool/updates/main/c/chromium/chromium-common_155.0.8059.79-1%7edeb13u1_arm64.deb' chromium-common_155.0.8059.79-1~deb13u1_arm64.deb 36302732 
+'http://deb.debian.org/debian/pool/non-free-firmware/h/hexagon-dsp-binaries/firmware-qcom-dsp_0%7e20260916-2%7ebpo13%2b1_all.deb' firmware-qcom-dsp_0~20260916-2~bpo13+1_all.deb 133104572 
+QUAY_END
+QUAY_REBOOT

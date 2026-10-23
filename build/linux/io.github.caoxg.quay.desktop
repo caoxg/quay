@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Quay
+GenericName=Arduino App Deployer
+GenericName[zh_CN]=Arduino 应用部署
+Comment=Deploy Arduino Apps from git to an Arduino UNO Q
+Comment[zh_CN]=从 git 仓库把 Arduino App 部署到 Arduino UNO Q
+Exec=quay
+Icon=io.github.caoxg.quay
+Terminal=false
+Categories=Development;Electronics;
+Keywords=Arduino;UNO Q;App Lab;deploy;
+StartupWMClass=io.github.caoxg.quay
+StartupNotify=true

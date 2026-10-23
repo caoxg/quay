@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Stand-in for arduino-app-cli on the fake board. Implements just what Quay calls."""
+import base64, json, os, pathlib, signal, subprocess, sys, time, zipfile, io
+
+HOME = pathlib.Path.home()
+APPS = HOME / "ArduinoApps"
+STATE = pathlib.Path("/tmp/fake-appcli")
+STATE.mkdir(exist_ok=True)
+LOG = STATE / "calls.log"
+DEFAULT = pathlib.Path("/var/lib/arduino-app-cli/default.app")
+LIB = HOME / ".arduino15/internal"
+
+with LOG.open("a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+
+def app_yaml(d):
+    out = {}
+    try:
+        for line in (d / "app.yaml").read_text().splitlines():
+            if ":" in line and not line.startswith(" "):
+                k, v = line.split(":", 1)
+                out[k.strip()] = v.strip().strip('"')
+    except OSError:
+        pass
+    return out
+
+def running():
+    p = STATE / "running"
+    return p.read_text().strip() if p.exists() else ""
+
+def server_pid():
+    p = STATE / "server.pid"
+    try:
+        return int(p.read_text())
+    except Exception:
+        return 0
+
+def stop_server():
+    pid = server_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    (STATE / "server.pid").unlink(missing_ok=True)
+    (STATE / "running").unlink(missing_ok=True)
+    time.sleep(0.3)
+
+SERVER = r'''
+import http.server, json, os
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(s):
+        mode = open("/tmp/fake-mode").read().strip() if os.path.exists("/tmp/fake-mode") else "shadow"
+        b = json.dumps({"mode": mode, "enabled": os.path.exists("/tmp/fake-enabled"), "feedback_hz": 100.0}).encode()
+        s.send_response(200); s.send_header("Content-Type", "application/json"); s.end_headers(); s.wfile.write(b)
+    def log_message(s, *a): pass
+http.server.HTTPServer(("127.0.0.1", 9527), H).serve_forever()
+'''
+
+def resolve_libs():
+    rb = LIB / "Arduino_RouterBridge_0.4.3_abc/Arduino_RouterBridge/src"
+    rp = LIB / "Arduino_RPClite_0.3.1_def/Arduino_RPClite/src"
+    if rb.exists():
+        return
+    rb.mkdir(parents=True); rp.mkdir(parents=True)
+    (rb / "bridge.h").write_text("#pragma once\n#define UPDATE_THREAD_STACK_SIZE    500\n")
+    (rp / "decoder.h").write_text('#include "transport.h"\nclass D {\n    void parse_packet(){\n      old();\n    }\n    bool packet_incoming() { return true; }\n};\n')
+
+def start(path):
+    path = pathlib.Path(path)
+    if not (path / "app.yaml").exists():
+        sys.exit(f"Error: {path} is not an app")
+    if running():
+        stop_server()
+    # Like the runtime refusing a model it cannot load (Policy.load raises): the app does not start.
+    for m in sorted((path / "python").glob("*.onnx")):
+        if b"QUAY_FAKE_BROKEN" in m.read_bytes():
+            sys.exit(f"Error: app failed to start: {m.name}: model failed to load")
+    resolve_libs()
+    sketch = path / ".cache/sketch"
+    if (path / "sketch").exists() and not sketch.exists():
+        sketch.mkdir(parents=True)
+        stack = [l for l in (LIB / "Arduino_RouterBridge_0.4.3_abc/Arduino_RouterBridge/src/bridge.h").read_text().splitlines() if "STACK" in l]
+        (sketch / "built-with").write_text(stack[0] + "\n")
+        with LOG.open("a") as f:
+            f.write("  built sketch with: " + stack[0] + "\n")
+    (path / ".cache/.venv").mkdir(parents=True, exist_ok=True)
+    p = subprocess.Popen([sys.executable, "-c", SERVER], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    (STATE / "server.pid").write_text(str(p.pid))
+    (STATE / "running").write_text(str(path))
+    time.sleep(0.4)
+    print(f"App '{app_yaml(path).get('name', path.name)}' started")
+
+args = sys.argv[1:]
+fmt_json = "--format" in args and args[args.index("--format") + 1] == "json"
+args = [a for i, a in enumerate(args) if a != "--format" and (i == 0 or sys.argv[1:][i - 1] != "--format")]
+
+def installed(pkg):
+    try:
+        return json.loads(pathlib.Path("/var/lib/fake-apt/db.json").read_text())["installed"].get(pkg, "")
+    except Exception:
+        return ""
+
+if args[:1] == ["version"]:
+    print("Arduino App CLI version " + (installed("arduino-app-cli") or "0.13.0") + "-fake")
+elif args[:2] == ["system", "set-name"]:
+    # Like the real one: hostnamectl through the password-less sudo rule.
+    if subprocess.run(["sudo", "-n", "/usr/bin/hostnamectl", "set-hostname", args[2]]).returncode:
+        sys.exit("failed to set the board name")
+    print(f"Board name set to {args[2]}")
+elif args[:2] == ["system", "update"]:
+    if "--yes" not in args:
+        sys.exit("refusing to update without --yes when there is no terminal")
+    db = json.loads(pathlib.Path("/var/lib/fake-apt/db.json").read_text())
+    names = [n for n, p in db["packages"].items() if n in db["installed"] and db["installed"][n] != p["version"]
+             and ("--only-arduino" not in args or "arduino.cc" in p["uri"])]
+    for cmd in (["sudo", "-n", "/usr/bin/apt-get", "update"],
+                ["sudo", "-n", "/usr/bin/apt-get", "install", "--only-upgrade", "-y"] + names):
+        if subprocess.run(cmd, stdin=subprocess.DEVNULL).returncode:
+            sys.exit("system update failed")
+    print("System updated")
+elif args[:2] == ["app", "list"]:
+    apps = []
+    for d in sorted(APPS.glob("*/app.yaml")):
+        d = d.parent
+        y = app_yaml(d)
+        status = "running" if running() == str(d) else ("stopped" if (d / ".cache").exists() else "uninitialized")
+        apps.append({"id": base64.urlsafe_b64encode(f"user:{d.name}".encode()).decode().rstrip("="), "name": y.get("name", d.name),
+                     "description": y.get("description", ""), "icon": y.get("icon", ""), "status": status, "example": False,
+                     "default": DEFAULT.exists() and DEFAULT.read_text().strip() == str(d)})
+    print(json.dumps({"apps": apps, "brokenApps": []}) if fmt_json else "\n".join(a["name"] for a in apps))
+elif args[:2] == ["app", "start"]:
+    start(args[2])
+elif args[:2] == ["app", "stop"]:
+    stop_server(); print("App stopped")
+elif args[:2] == ["app", "destroy"]:
+    stop_server()
+    subprocess.run(["rm", "-rf", str(pathlib.Path(args[2]) / ".cache")])
+    print("✓ App destroyed successfully.")
+elif args[:2] == ["app", "logs"]:
+    follow = "--follow" in args
+    for i in range(5):
+        print(f"INFO  fake app log line {i}", flush=True)
+    while follow:
+        time.sleep(0.5); print("INFO  still running", flush=True)
+elif args[:2] == ["app", "export"]:
+    path = pathlib.Path(args[2]); buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for f in path.rglob("*"):
+            if f.is_file() and ".cache" not in f.parts and ("--include-data" in args or "data" not in f.relative_to(path).parts):
+                z.write(f, f.relative_to(path))
+    sys.stdout.buffer.write(buf.getvalue())
+elif args[:3] == ["properties", "set", "default"]:
+    if len(args) < 4 or args[3] == "none":
+        DEFAULT.unlink(missing_ok=True); print("No default app set")
+    else:
+        DEFAULT.write_text(args[3]); print(f"Default app: {args[3]}")
+else:
+    sys.exit("fake arduino-app-cli: unsupported: " + " ".join(sys.argv[1:]))

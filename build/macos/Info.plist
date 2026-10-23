@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Quay</string>
+  <key>CFBundleDisplayName</key><string>Quay</string>
+  <key>CFBundleIdentifier</key><string>io.github.caoxg.quay</string>
+  <key>CFBundleExecutable</key><string>quay</string>
+  <key>CFBundleIconFile</key><string>icon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>NUMVER</string>
+  <key>CFBundleVersion</key><string>NUMVER</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSLocalNetworkUsageDescription</key><string>Quay connects to your Arduino UNO Q boards on the local network over SSH.</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Xiaogang Cao. Apache License 2.0. Arduino® is a trademark of Arduino S.r.l.; Quay is an independent project.</string>
+</dict>
+</plist>

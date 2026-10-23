@@ -1,0 +1,10 @@
+#!/bin/bash
+# Stand-in for hostnamectl on the fake board (the container runs with CAP_SYS_ADMIN, so it can
+# change its own host name).
+case "${1:-}" in
+  set-hostname)
+    [ "$(id -u)" = 0 ] || { echo "Could not set static hostname: Access denied" >&2; exit 1; }
+    hostname "$2" && { echo "$2" > /etc/hostname 2>/dev/null || true; } ;;
+  ""|status) echo " Static hostname: $(hostname)" ;;
+  *) echo "fake hostnamectl: unsupported: $*" >&2; exit 1 ;;
+esac

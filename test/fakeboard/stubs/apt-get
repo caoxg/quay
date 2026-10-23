@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Stand-in for apt-get on the fake board: a small package database with pending upgrades, enough
+for Quay's system update (simulate, --print-uris, update, install --only-upgrade). Commands that
+need root fail without it, like the real one."""
+import json, os, pathlib, sys
+
+DB = pathlib.Path("/var/lib/fake-apt/db.json")
+db = json.loads(DB.read_text())
+args, opts, words, i = sys.argv[1:], [], [], 0
+while i < len(sys.argv[1:]):
+    a = args[i]
+    if a == "-o":
+        opts.append(args[i + 1]); i += 2
+    elif a.startswith("-"):
+        opts.append(a); i += 1
+    else:
+        words.append(a); i += 1
+cmd = words[0] if words else ""
+
+def pending():
+    out = []
+    for name, p in db["packages"].items():
+        cur = db["installed"].get(name)
+        if p.get("new"):  # a new dependency, pulled in when its parent is upgraded
+            parent = p["new"]
+            if cur is None and db["installed"].get(parent) != db["packages"][parent]["version"]:
+                out.append((name, None, p))
+        elif cur is not None and cur != p["version"]:
+            out.append((name, cur, p))
+    return out
+
+def need_root():
+    if os.geteuid() != 0:
+        print("E: Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)", file=sys.stderr)
+        sys.exit(100)
+
+if cmd == "update":
+    need_root()
+    print("Hit:1 http://deb.debian.org/debian trixie InRelease")
+    print("Get:2 https://apt-repo.arduino.cc stable InRelease [3141 B]")
+    print("Reading package lists...")
+elif cmd in ("dist-upgrade", "upgrade") and "-s" in opts:
+    for name, cur, p in pending():
+        print(f"Inst {name} {'[' + cur + '] ' if cur else ''}({p['version']} {p['origin']} [arm64])")
+elif cmd in ("dist-upgrade", "upgrade") and "--print-uris" in opts:
+    for name, cur, p in pending():
+        if f"{name}_{p['version']}" not in db.get("cached", []):  # like apt: downloaded debs are not fetched again
+            print(f"'{p['uri']}' {name}_{p['version']}_arm64.deb {p['size']} SHA256:0")
+elif cmd == "install" and "--only-upgrade" in opts and "-d" in opts:
+    need_root()
+    status = "APT::Status-Fd=1" in opts
+    want = [n for n in words[1:] if n in db["packages"] and db["installed"].get(n) not in (None, db["packages"][n]["version"])]
+    want += [d for d, q in db["packages"].items() if q.get("new") in want and d not in db["installed"]]
+    fetch = [n for n in want if f"{n}_{db['packages'][n]['version']}" not in db.get("cached", [])]
+    total = sum(db["packages"][n]["size"] for n in fetch) or 1
+    got = 0
+    for i, n in enumerate(fetch, 1):
+        q = db["packages"][n]
+        print(f"Get:{i} {q['uri']} [{q['size']} B]", flush=True)
+        got += q["size"]
+        if status:
+            print(f"dlstatus:{i}:{100 * got / total:.4f}:Retrieving file {i} of {len(fetch)}", flush=True)
+        db.setdefault("cached", []).append(f"{n}_{q['version']}")
+    print(f"Fetched {got} B in 1s" if fetch else "0 upgraded, 0 newly installed, 0 to remove.")
+    print("Download complete and in download only mode")
+    DB.write_text(json.dumps(db, indent=1))
+elif cmd == "install" and "--only-upgrade" in opts:
+    need_root()
+    done = []
+    for name in words[1:]:
+        p = db["packages"].get(name)
+        if not p or name not in db["installed"]:
+            print(f"Skipping {name}, it is not installed"); continue
+        if db["installed"][name] == p["version"]:
+            print(f"{name} is already the newest version ({p['version']})."); continue
+        if f"{name}_{p['version']}" not in db.get("cached", []):
+            print(f"Get: {p['uri']} [{p['size']} B]")
+        print(f"Unpacking {name} ({p['version']}) over ({db['installed'][name]}) ...")
+        db["installed"][name] = p["version"]
+        done.append(name)
+        for dep, q in db["packages"].items():
+            if q.get("new") == name and dep not in db["installed"]:
+                db["installed"][dep] = q["version"]
+                print(f"Setting up {dep} ({q['version']}) ...")
+    for name in done:
+        print(f"Setting up {name} ({db['packages'][name]['version']}) ...")
+    DB.write_text(json.dumps(db, indent=1))
+elif cmd == "clean":
+    need_root()
+else:
+    print("fake apt-get: unsupported: " + " ".join(args), file=sys.stderr)
+    sys.exit(100)

@@ -1,0 +1,114 @@
+# Built-in Quay profile for XGO-Duck (Luwu Dynamics), used until the runtime repository ships its
+# own quay.yaml. It only drives scripts that already live in that repository.
+id: xgoduck
+name: XGO-Duck
+description: Duck-shaped biped robot (Microduck lineage) — walking, get-up and pick policies at 50 Hz.
+folder: xgoduck_runtime_arduino
+source:
+  repo: https://github.com/LuwuDynamics/xgoduck_runtime_arduino
+match:
+  repos:
+    - github.com/LuwuDynamics/xgoduck_runtime_arduino
+  app_names:
+    - XGO Duck
+
+system:
+  description: >-
+    Sets the Linux↔MCU router serial link to 2 Mbps (the runtime's tools/router-2m.sh).
+    The setting is global: other apps that expect the stock 115200 baud stop working until it is reverted.
+  description_zh: >-
+    把 Linux 和 MCU 之间的路由串口提速到 2 Mbps（运行时自带的 tools/router-2m.sh）。
+    这是全板设置：其他按默认 115200 波特率工作的 App 在撤销前都会失灵。
+  check: grep -qs 2000000 /etc/systemd/system/arduino-router.service.d/90-xgoduck-baud.conf
+  apply: bash tools/router-2m.sh
+  revert: |
+    rm -f /etc/systemd/system/arduino-router.service.d/90-xgoduck-baud.conf
+    systemctl daemon-reload
+    systemctl restart arduino-router
+  stop_app: true
+
+before_start:
+  run: python3 tools/prepare-bridge.py
+  description: Patches the RouterBridge and RPClite libraries the sketch uses (a bigger RPC stack, bounded message framing) and rebuilds the firmware when they change.
+  description_zh: 给固件用到的 RouterBridge、RPClite 库打补丁（更大的 RPC 栈、限定长度的消息帧），库有变化时自动重新编译固件。
+  resolve_on_failure: true
+  rebuild_when_changed:
+    - .arduino15/internal/Arduino_RouterBridge_*/Arduino_RouterBridge/src/bridge.h
+    - .arduino15/internal/Arduino_RPClite_*/Arduino_RPClite/src/decoder.h
+    - .arduino15/internal/Arduino_RPClite_*/Arduino_RPClite/src/duck_msgpack_frame.h
+
+health:
+  url: http://127.0.0.1:9527/api/status
+  timeout: 240
+
+safety:
+  url: http://127.0.0.1:9527/api/status
+  field: enabled
+  message: The servos are powered (torque on). Turn torque off in the duck's web UI or put the duck down first.
+  also:
+    - field: mode
+      equals: [calibrate, servo_debug]
+      message: Calibration or servo setup is open in the duck's web UI, and servos may be holding. Exit it first.
+
+web:
+  port: 9527
+
+policies:
+  # The runtime loads every model from python/ when it starts (python/controller.py).
+  dir: python
+  input: [1, 61]
+  output: [1, 14]
+  match_metadata: [joint_names, observation_names]
+  # The unofficial community collection (policies/index.yaml), with a CDN copy for networks where
+  # GitHub's raw files are slow.
+  index:
+    url: https://raw.githubusercontent.com/caoxg/awesome-xgo-duck/main/policies/index.yaml
+    mirrors:
+      - https://cdn.jsdelivr.net/gh/caoxg/awesome-xgo-duck@main/policies/index.yaml
+  slots:
+    - id: walk
+      file: xgoduck_walk.onnx
+      name: Walk
+      name_zh: 行走
+      description: Default walking model, also used for the recovery walk.
+    - id: roller
+      file: xgoduck_roller.onnx
+      name: Roller walk
+      name_zh: 轮滑
+      description: Used in Roller mode. The runtime takes its home pose from the model's default_joint_pos.
+      require_metadata: [default_joint_pos]
+    - id: getup
+      file: xgoduck_getup.onnx
+      name: Get up
+      name_zh: 起身
+      description: Runs after a fall (tilt above 55° for 0.15 s) until the duck stands again.
+    - id: pick
+      file: xgoduck_pick.onnx
+      name: Pick
+      name_zh: 啄食
+      description: One 4 s pick cycle, played while walking upright.
+    - id: roulade
+      file: xgoduck_roulade.onnx
+      name: Roulade
+      name_zh: 翻滚
+      description: The 1.9 s roulade move.
+
+actions:
+  - label: Calibration
+    label_zh: 标定
+    url: /calibrate.html
+    description: Set each servo's center, with the duck in its center pose.
+  - label: Servo setup
+    label_zh: 舵机设置
+    url: /servo.html
+    description: Scan the bus, set servo IDs and protection.
+
+uninstall:
+  description: Puts back the library files prepare-bridge.py patched.
+  description_zh: 把 prepare-bridge.py 打过补丁的库文件恢复原样。
+  run: |
+    for f in "$HOME"/.arduino15/internal/Arduino_RouterBridge_*/Arduino_RouterBridge/src/bridge.h.original \
+             "$HOME"/.arduino15/internal/Arduino_RPClite_*/Arduino_RPClite/src/decoder.h.original; do
+      if [ -f "$f" ]; then mv -f "$f" "${f%.original}"; fi
+    done
+    rm -f "$HOME"/.arduino15/internal/Arduino_RPClite_*/Arduino_RPClite/src/duck_msgpack_frame.h

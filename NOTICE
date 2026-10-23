@@ -1,0 +1,9 @@
+Quay
+Copyright 2026 Xiaogang Cao
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+It includes third-party software under their own licenses; see
+THIRD_PARTY_LICENSES.txt, or run `quay licenses`.
+
+Arduino® and UNO™ are trademarks of Arduino S.r.l. Quay is an independent
+project and is not affiliated with or endorsed by Arduino.
