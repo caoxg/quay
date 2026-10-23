@@ -1,0 +1,99 @@
+# Builds every package on GitHub's runners, the way `make release` does on a Mac.
+#   push a tag v*        → a draft release with all files and SHA256SUMS (publish it by hand)
+#   Run workflow (manual) → the same files as a workflow artifact, no release
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version string for a test build (no release is made)
+        default: v0.0.0-ci
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+
+jobs:
+  macos:
+    name: macOS (universal .dmg, .zip)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make mac VERSION="$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/Quay-*-macos-universal.*
+          if-no-files-found: error
+
+  linux:
+    name: Linux ${{ matrix.arch }} (.deb, .tar.gz)
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Built in the same Debian 12 container as on a Mac, natively on each runner's architecture.
+      - run: make linux LINUX_ARCHS=${{ matrix.arch }} VERSION="$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  windows-and-cli:
+    name: Windows (.zip) and command-line binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make windows clis VERSION="$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-and-cli
+          path: |
+            dist/Quay-*-windows-*.zip
+            dist/quay-cli-*
+          if-no-files-found: error
+
+  release:
+    name: Checksums and release
+    needs: [macos, linux, windows-and-cli]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Draft the release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --draft \
+            --title "Quay ${VERSION#v}" --notes "Built by GitHub Actions from $GITHUB_SHA. Edit these notes, then publish."
+      - name: Keep the files (test build)
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: quay-${{ env.VERSION }}
+          path: dist/*
