@@ -8,6 +8,13 @@
 
 <p align="center"><img src="docs/images/overview-zh.png" alt="Quay 主界面：板子、系统、国内加速、经这台电脑下载，以及两个 App，其中一个在 GitHub 上有更新" width="860"></p>
 
+> [!NOTE]
+> **Quay 是面向所有 Arduino App 的独立项目。** 与 Arduino 无关联，也与 XGO-Duck 的开发方陆吾智能（Luwu Dynamics）无关联，未获两者认可。
+>
+> - **XGO-Duck 只是其中一份定制配置。** 它是 Quay 目前自带的唯一一份，也是这些截图里的示例 App。这份配置是为 Quay 编写的，不是陆吾智能出品。
+> - **XGO-Duck 本身**在 [github.com/LuwuDynamics](https://github.com/LuwuDynamics)，它的 App 是 [xgoduck_runtime_arduino](https://github.com/LuwuDynamics/xgoduck_runtime_arduino)。机器人本身的问题请到那里找官方支持。
+> - Arduino® 和 UNO™ 是 Arduino S.r.l. 的商标；XGO 是陆吾智能使用的名称。
+
 ## 亮点
 
 ### 国内下载加速
@@ -30,6 +37,8 @@
 - 网页控制台和快捷按钮（XGO-Duck 的是「标定」「舵机设置」）；
 - 策略插槽；
 - 删除时的清理。
+
+目前 Quay 自带一份这样的配置，用于 [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino)，作为示例。其他 App 可以自带 `quay.yaml`，用法完全一样。
 
 对运行训练模型的机器人，**策略**功能可以安装别人训练好的模型：上板前先检查是否和 App 匹配，App 更新后也会保留你的选择。XGO-Duck 的策略来自社区合集 [awesome-xgo-duck](https://github.com/caoxg/awesome-xgo-duck)。
 
@@ -72,9 +81,6 @@ Quay 是给 Arduino UNO Q 的 Linux 一侧用的桌面应用，同时也是命�
 - **板子下载慢时的加速。** `quay mirror cn` 先从板子上给 8 个国内镜像测速，把 pip、uv 和 apt 的 Debian 软件包指向最快的那个；apt 还会配上测速靠前的其他镜像和官方源，某个镜像坏了会自动换下一个。`quay relay on` 让板子在 Quay 连着的时候经你的电脑（及其代理）下载。两者都是独立、可撤销的命令，不会被顺带执行。
 - **SSH 或 USB。** Wi‑Fi/有线走 SSH（agent、密钥文件或密码），也可以用 USB（`adb`）。
 - **原生、轻量。** 界面使用系统自带的 WebView（macOS、Linux 上是 WebKit，Windows 上是 WebView2），基于 [Wails v3](https://v3.wails.io)，不打包 Chromium。同一个程序既是桌面应用也是 CLI。
-
-> [!NOTE]
-> Quay 是独立项目，与 Arduino 无关联，也未获其认可。Arduino® 和 UNO™ 是 Arduino S.r.l. 的商标。
 
 ## 安装
 
@@ -236,7 +242,7 @@ safety: { url: http://127.0.0.1:9527/api/status, field: enabled, message: 先关
 web: { port: 9527 }
 ```
 
-完整说明见 [docs/quay-yaml.md](docs/quay-yaml.md)（英文）。对于还没有自带 `quay.yaml` 的已知应用，Quay 内置了配置（`quay profiles` 可列出），目前有 [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino)。仓库里的 `quay.yaml` 永远优先于内置配置。
+完整说明见 [docs/quay-yaml.md](docs/quay-yaml.md)（英文）。对于还没有自带 `quay.yaml` 的已知应用，Quay 内置了配置（`quay profiles` 可列出），目前只有一份，用于 [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino)。它是为 Quay 编写的，只调用那个仓库里现成的脚本，不由陆吾智能维护。仓库里的 `quay.yaml` 永远优先于内置配置。
 
 ## 文件与设置
 

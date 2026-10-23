@@ -8,6 +8,13 @@
 
 <p align="center"><img src="docs/images/overview-en.png" alt="Quay showing a board, its system, the China mirrors and the relay, and two apps — one with an update from GitHub" width="860"></p>
 
+> [!NOTE]
+> **Quay is an independent project for any Arduino App.** It is not affiliated with or endorsed by Arduino, or by Luwu Dynamics (陆吾智能), the maker of XGO-Duck.
+>
+> - **XGO-Duck is only one custom profile.** It is the one Quay ships today, and the example app in these screenshots. The profile was written for Quay, not by Luwu Dynamics.
+> - **XGO-Duck itself** is at [github.com/LuwuDynamics](https://github.com/LuwuDynamics). Its app is [xgoduck_runtime_arduino](https://github.com/LuwuDynamics/xgoduck_runtime_arduino); get support for the robot there.
+> - Arduino® and UNO™ are trademarks of Arduino S.r.l.; XGO is a name of Luwu Dynamics.
+
 ## Highlights
 
 ### Fast downloads in mainland China
@@ -25,6 +32,8 @@ Apps in the **Custom** tab come with a Quay profile (their own [`quay.yaml`](doc
 - the web console and shortcuts to its pages (for XGO-Duck: Calibration and Servo setup);
 - policy slots;
 - clean-up on erase.
+
+Today Quay ships one such profile, for [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino), as a worked example. Any other app brings its own `quay.yaml`, and it works the same way.
 
 For robots that run trained models, **Policies** installs models other people trained, checks each one against the app before it reaches the board, and keeps your choice across updates. XGO-Duck reads its models from the community collection [awesome-xgo-duck](https://github.com/caoxg/awesome-xgo-duck).
 
@@ -60,9 +69,6 @@ It is what you would otherwise do by hand over SSH, and an alternative to re-fla
 - **Faster downloads where the board is slow.** `quay mirror cn` tests eight mirrors in mainland China from the board itself and points pip, uv and apt's Debian packages at the fastest; apt also gets the next fastest and the official servers to fall back to by itself if a mirror breaks. `quay relay on` lets the board download through your computer (and its proxy) while Quay is connected. Both are separate, reversible commands, never applied implicitly.
 - **SSH or USB.** Wi‑Fi/Ethernet over SSH (agent, key files, or password), or USB through `adb`.
 - **Native and small.** The app uses the system web view (WebKit on macOS and Linux, WebView2 on Windows) through [Wails v3](https://v3.wails.io); there is no bundled Chromium. One binary is both the app and the CLI.
-
-> [!NOTE]
-> Quay is an independent project. It is not affiliated with or endorsed by Arduino. Arduino® and UNO™ are trademarks of Arduino S.r.l.
 
 ## Install
 
@@ -214,7 +220,7 @@ safety: { url: http://127.0.0.1:9527/api/status, field: enabled, message: Turn t
 web: { port: 9527 }
 ```
 
-The full reference is in [docs/quay-yaml.md](docs/quay-yaml.md). Quay also carries built-in profiles for known apps that do not ship a `quay.yaml` yet (`quay profiles` lists them). Currently that is [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino). A `quay.yaml` in the repository always wins over a built-in profile.
+The full reference is in [docs/quay-yaml.md](docs/quay-yaml.md). Quay also carries built-in profiles for known apps that do not ship a `quay.yaml` yet (`quay profiles` lists them). Currently there is one, for [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino). It was written for Quay and only drives scripts that already live in that repository; it is not maintained by Luwu Dynamics. A `quay.yaml` in the repository always wins over a built-in profile.
 
 ## Files and settings
 
