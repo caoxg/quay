@@ -1,0 +1,9 @@
+# Quay's profiles (https://github.com/caoxg/quay-profiles): app profiles for apps that do not
+# ship a quay.yaml, and system profiles for board systems other than the stock image. Quay keeps
+# this copy and uses the repository's when it is newer (`updated`).
+schema: 1
+updated: "2026-10-25"
+apps:
+  - apps/xgoduck.yaml
+systems:
+  - systems/duck-os.yaml

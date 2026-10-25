@@ -1,8 +1,18 @@
 #!/bin/bash
-# Stand-in for systemctl on the fake board: records calls, answers the few queries router-2m.sh makes.
+# Stand-in for systemctl on the fake board: records calls, answers the few queries router-2m.sh makes,
+# and reports Quay's own units (quay-*) as enabled and active while their unit file is installed.
 echo "$(id -un): systemctl $*" >> /var/log/fake-systemctl.log
+unit="${*: -1}"
 case "$1" in
   cat) printf '[Service]\nExecStart=/usr/bin/arduino-router --serial-baudrate 115200\n' ;;
   show) grep -h ExecStart= /etc/systemd/system/arduino-router.service.d/*.conf 2>/dev/null | tail -1 ;;
+  is-enabled|is-active)
+    case "$unit" in quay-*) ;; *) exit 0 ;; esac
+    if [ -f "/etc/systemd/system/$unit" ]; then
+      [ "$2" = --quiet ] || { [ "$1" = is-enabled ] && echo enabled || echo active; }
+      exit 0
+    fi
+    [ "$2" = --quiet ] || { [ "$1" = is-enabled ] && echo disabled || echo inactive; }
+    exit 3 ;;
 esac
 exit 0

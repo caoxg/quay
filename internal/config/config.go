@@ -50,6 +50,14 @@ func PolicyCacheDir() string {
 	}
 	return filepath.Join(Dir(), "policies")
 }
+
+// ProfileCacheDir keeps the copy of the quay-profiles repository (system profiles).
+func ProfileCacheDir() string {
+	if d, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(d, "Quay", "profiles")
+	}
+	return filepath.Join(Dir(), "profiles")
+}
 func RepoCacheDir() string {
 	if d, err := os.UserCacheDir(); err == nil {
 		return filepath.Join(d, "Quay", "repos")

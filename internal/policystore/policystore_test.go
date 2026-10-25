@@ -153,3 +153,17 @@ func TestCheck(t *testing.T) {
 		t.Fatalf("without a stock model only shapes are checked: %v", probs)
 	}
 }
+
+func TestDescribe(t *testing.T) {
+	for _, c := range []struct{ url, name, page string }{
+		{"https://raw.githubusercontent.com/caoxg/awesome-xgo-duck/main/policies/index.yaml", "awesome-xgo-duck", "https://github.com/caoxg/awesome-xgo-duck"},
+		{"https://cdn.jsdelivr.net/gh/caoxg/awesome-xgo-duck@main/policies/index.yaml", "awesome-xgo-duck", "https://github.com/caoxg/awesome-xgo-duck"},
+		{"https://github.com/someone/policies/raw/main/index.yaml", "policies", "https://github.com/someone/policies"},
+		{"https://example.com/lab/index.yaml", "example.com", "https://example.com/lab/index.yaml"},
+		{"/Users/me/class/index.yaml", "index.yaml", ""},
+	} {
+		if name, page := Describe(c.url); name != c.name || page != c.page {
+			t.Errorf("Describe(%s) = %q, %q; want %q, %q", c.url, name, page, c.name, c.page)
+		}
+	}
+}

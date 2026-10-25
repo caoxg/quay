@@ -13,25 +13,31 @@ import (
 	"github.com/caoxg/quay/internal/board"
 	"github.com/caoxg/quay/internal/profile"
 	"github.com/caoxg/quay/internal/remote"
+	"github.com/caoxg/quay/internal/sysprofile"
 	"gopkg.in/yaml.v3"
 )
 
 // Status describes a board and its user apps.
 type Status struct {
-	Target        string    `json:"target"`
-	User          string    `json:"user"`
-	Home          string    `json:"home"`
-	Hostname      string    `json:"hostname"`
-	Model         string    `json:"model"`
-	Serial        string    `json:"serial"`
-	IsUnoQ        bool      `json:"isUnoQ"`
-	IPs           []IfaceIP `json:"ips"`
-	AppCLI        bool      `json:"appcli"`
-	AppCLIVersion string    `json:"appcliVersion"`
-	AppListError  string    `json:"appListError,omitempty"`
-	OS            OSInfo    `json:"os"`
-	Mirror        Mirror    `json:"mirror"`
-	Relay         Relay     `json:"relay"`
+	Target        string      `json:"target"`
+	User          string      `json:"user"`
+	Home          string      `json:"home"`
+	Hostname      string      `json:"hostname"`
+	Model         string      `json:"model"`
+	Serial        string      `json:"serial"`
+	IsUnoQ        bool        `json:"isUnoQ"`
+	IPs           []IfaceIP   `json:"ips"`
+	AppCLI        bool        `json:"appcli"`
+	AppCLIVersion string      `json:"appcliVersion"`
+	AppListError  string      `json:"appListError,omitempty"`
+	OS            OSInfo      `json:"os"`
+	Mirror        Mirror      `json:"mirror"`
+	Relay         Relay       `json:"relay"`
+	Net           *NetSummary `json:"net,omitempty"`
+	// System is the board's system when a system profile recognises it (not the stock image), and
+	// Findings what that profile says to show on the overview.
+	System   *sysprofile.Detected `json:"system,omitempty"`
+	Findings []sysprofile.Finding `json:"findings,omitempty"`
 	// AuthorizedKeys are the base64 parts of the login user's ~/.ssh/authorized_keys, to tell
 	// whether this computer's public key is on the board.
 	AuthorizedKeys []string    `json:"authorizedKeys"`
@@ -139,16 +145,18 @@ type rawStatus struct {
 			Error string `json:"error"`
 		} `json:"brokenApps"`
 	} `json:"appList"`
-	AppListError   string   `json:"appListError"`
-	PipIndex       string   `json:"pipIndex"`
-	PipExtra       string   `json:"pipExtra"`
-	UVIndex        string   `json:"uvIndex"`
-	MirrorManaged  bool     `json:"mirrorManaged"`
-	DebianMirror   string   `json:"debianMirror"`
-	DebianFallback []string `json:"debianFallback"`
-	DebianManaged  bool     `json:"debianManaged"`
-	AuthorizedKeys []string `json:"authorizedKeys"`
-	RelayHook      bool     `json:"relay"`
+	AppListError   string                         `json:"appListError"`
+	PipIndex       string                         `json:"pipIndex"`
+	PipExtra       string                         `json:"pipExtra"`
+	UVIndex        string                         `json:"uvIndex"`
+	MirrorManaged  bool                           `json:"mirrorManaged"`
+	DebianMirror   string                         `json:"debianMirror"`
+	DebianFallback []string                       `json:"debianFallback"`
+	DebianManaged  bool                           `json:"debianManaged"`
+	AuthorizedKeys []string                       `json:"authorizedKeys"`
+	RelayHook      bool                           `json:"relay"`
+	Net            *NetSummary                    `json:"net"`
+	SysFiles       map[string]sysprofile.FileFact `json:"sysFiles"`
 	Folders        []struct {
 		Folder   string                     `json:"folder"`
 		Path     string                     `json:"path"`
@@ -163,7 +171,9 @@ type rawStatus struct {
 // Status reads the board state (one round trip, plus one for profile checks).
 func (s *Session) Status(ctx context.Context) (*Status, error) {
 	var out, errb strings.Builder
-	if err := s.T.Exec(ctx, "python3 -", strings.NewReader(remote.Status), &out, &errb); err != nil {
+	set := sysprofile.Current(ctx)
+	exists, keys := sysprofile.Checks(set.Profiles)
+	if err := s.T.Exec(ctx, "python3 -", strings.NewReader(remote.WithChecks(remote.Status, exists, keys)), &out, &errb); err != nil {
 		if strings.Contains(errb.String(), "not found") {
 			return nil, fmt.Errorf("python3 is missing on the board — is this an Arduino UNO Q?")
 		}
@@ -179,7 +189,13 @@ func (s *Session) Status(ctx context.Context) (*Status, error) {
 		Mirror:         Mirror{Pip: raw.PipIndex, PipFallback: raw.PipExtra, UV: raw.UVIndex, Debian: raw.DebianMirror, DebianFallback: raw.DebianFallback, Managed: raw.MirrorManaged || raw.DebianManaged},
 		AuthorizedKeys: append([]string{}, raw.AuthorizedKeys...),
 		Relay:          Relay{Installed: raw.RelayHook, Active: s.RelayActive()},
+		Net:            raw.Net,
 		CheckedAt:      time.Now().UnixMilli(),
+	}
+	facts := sysprofile.Facts{Files: raw.SysFiles}
+	if p := sysprofile.Identify(set.Profiles, facts); p != nil {
+		st.System = p.Info(facts)
+		st.Findings = p.Findings(facts, "overview")
 	}
 	for _, c := range raw.Compatible {
 		if strings.HasPrefix(c, "arduino,imola") {

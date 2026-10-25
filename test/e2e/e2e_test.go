@@ -21,6 +21,8 @@ import (
 	"github.com/caoxg/quay/internal/core"
 	"github.com/caoxg/quay/internal/mirror"
 	"github.com/caoxg/quay/internal/relay"
+	"github.com/caoxg/quay/internal/remote"
+	"github.com/caoxg/quay/internal/sysprofile"
 )
 
 const (
@@ -720,11 +722,282 @@ func TestCLI(t *testing.T) {
 	if !strings.Contains(out, `"default": true`) {
 		t.Fatalf("json status: %s", out)
 	}
+	if out := run("wifi"); !strings.Contains(out, "* home") || !strings.Contains(out, "in use") {
+		t.Fatalf("wifi: %s", out)
+	}
+	if out := run("wifi", "scan"); !strings.Contains(out, "Neighbor") {
+		t.Fatalf("wifi scan: %s", out)
+	}
+	if out := run("hotspot"); !strings.Contains(out, "stays offline") {
+		t.Fatalf("hotspot: %s", out)
+	}
 	out = run("erase", "hello_unoq", "--yes")
 	if !strings.Contains(out, "erased hello_unoq") || shOK("test -e /home/arduino/ArduinoApps/hello_unoq") {
 		t.Fatalf("erase: %s", out)
 	}
 	t.Logf("CLI ok")
+}
+
+// TestNetwork saves Wi-Fi networks and phone hotspots and walks through the away plans on the fake
+// board (its nmcli keeps profiles from the keyfiles Quay writes; nothing runs the service).
+func TestNetwork(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	target := board.Target{Kind: board.KindSSH, Host: "127.0.0.1", Port: port, User: "arduino"}
+	s, err := core.Connect(ctx, target, &pw{}, filepath.Join(t.TempDir(), "known_hosts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sink, _ := collect(t)
+	network := func() *core.Network {
+		t.Helper()
+		n, err := s.Network(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	profile := func(n *core.Network, ssid string) core.WifiProfile {
+		t.Helper()
+		for _, p := range n.Profiles {
+			if p.SSID == ssid {
+				return p
+			}
+		}
+		t.Fatalf("no saved %q in %+v", ssid, n.Profiles)
+		return core.WifiProfile{}
+	}
+	saved := func(ssid string) bool {
+		for _, p := range network().Profiles {
+			if p.SSID == ssid {
+				return true
+			}
+		}
+		return false
+	}
+	setActive := func(id string) { // the fake board's NetworkManager switches networks
+		sh(t, `python3 -c "import json; p='/var/lib/fake-nm/state.json'; s=json.load(open(p)); s['active']=[u for u,x in s['profiles'].items() if x['connection.id']=='`+id+`'][0]; json.dump(s, open(p,'w'))"`)
+	}
+	away := func(mode, ssid, psk string) {
+		t.Helper()
+		if err := s.Away(ctx, sink, mode, ssid, psk); err != nil {
+			t.Fatal(err)
+		}
+		if n := network(); n.Away != mode {
+			t.Fatalf("away %q, want %q", n.Away, mode)
+		}
+	}
+
+	st, err := s.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Net == nil || st.Net.SSID != "home" || st.Net.Hotspot || st.Net.Away != "off" {
+		t.Fatalf("status net: %+v", st.Net)
+	}
+	if n := network(); !n.NMCLI || !n.AP || n.Away != "off" || n.Hotspot.Configured || !profile(n, "home").Active {
+		t.Fatalf("network: %+v", n)
+	}
+	seen, err := s.WifiScan(ctx)
+	if err != nil || len(seen) != 2 || seen[0].SSID != "home" {
+		t.Fatalf("scan: %v %+v", err, seen)
+	}
+	// Boards set up before 2026-10-25 say "own" for what is now "board".
+	sh(t, `mkdir -p /etc/quay && echo '{"away": "own"}' > /etc/quay/network.json`)
+	if st, err := s.Status(ctx); err != nil || st.Net.Away != "board" || network().Away != "board" {
+		t.Fatalf("old plan name: %v %+v", err, st.Net)
+	}
+	sh(t, "rm /etc/quay/network.json")
+
+	t.Run("save an ordinary Wi-Fi and a phone hotspot", func(t *testing.T) {
+		if err := s.WifiAdd(ctx, sink, "office", "office-pass", false, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.WifiAdd(ctx, sink, "Wei's phone", "phone-pass", false, true); err != nil {
+			t.Fatal(err)
+		}
+		n := network()
+		if o := profile(n, "office"); o.Phone || !o.Autoconnect || !o.Secure {
+			t.Fatalf("office: %+v", o)
+		}
+		if p := profile(n, "Wei's phone"); !p.Phone || p.Autoconnect || p.Priority != -10 { // plan off: not joined
+			t.Fatalf("phone: %+v", p)
+		}
+		if got := sh(t, "stat -c '%a %U' /etc/NetworkManager/system-connections/quay-wifi-*.nmconnection | sort -u"); got != "600 root" {
+			t.Fatalf("keyfiles: %s", got)
+		}
+		if shOK("ls /tmp/quay-secret-* 2>/dev/null | grep -q .") {
+			t.Fatal("a password file was left in /tmp")
+		}
+		if err := s.WifiAdd(ctx, sink, "Wei's phone", "other-pass", false, true); err == nil || !strings.Contains(err.Error(), "saved already") {
+			t.Fatalf("duplicate: %v", err)
+		}
+		if err := s.WifiAdd(ctx, sink, "bad;name", "", false, false); err == nil {
+			t.Fatal("accepted a ';' in the name")
+		}
+	})
+
+	t.Run("own hotspot needs its settings, then keeps the phone out", func(t *testing.T) {
+		if err := s.Away(ctx, sink, "board", "", ""); err == nil || !strings.Contains(err.Error(), "name and password first") {
+			t.Fatalf("no settings: %v", err)
+		}
+		if err := s.Away(ctx, sink, "board", "duck-test", ""); err == nil || !strings.Contains(err.Error(), "needs a password") {
+			t.Fatalf("no password: %v", err)
+		}
+		away("board", "duck-test", "hotspot-pw")
+		n := network()
+		h := n.Hotspot
+		if !h.Configured || !h.Installed || !h.Enabled || !h.Running || h.SSID != "duck-test" || h.Active || !profile(n, "home").Active || profile(n, "Wei's phone").Autoconnect {
+			t.Fatalf("own: %+v", n)
+		}
+		kf := sh(t, "cat /etc/NetworkManager/system-connections/quay-hotspot.nmconnection")
+		for _, want := range []string{"mode=ap", "autoconnect=false", "method=shared", "psk=hotspot-pw"} {
+			if !strings.Contains(kf, want) {
+				t.Fatalf("keyfile lacks %s:\n%s", want, kf)
+			}
+		}
+		if got := sh(t, "stat -c %a /usr/local/lib/quay/quay-hotspot && python3 -m py_compile /usr/local/lib/quay/quay-hotspot && echo compiled"); !strings.HasSuffix(got, "compiled") {
+			t.Fatalf("service: %s", got)
+		}
+		if got := sh(t, "stat -c '%a %U' /etc/quay/network.json"); got != "644 root" {
+			t.Fatalf("config: %s", got)
+		}
+	})
+
+	t.Run("both joins the phone, and a new name keeps the password", func(t *testing.T) {
+		before := network().Hotspot.UUID
+		away("both", "duck-2", "")
+		n := network()
+		if p := profile(n, "Wei's phone"); !p.Autoconnect || p.Priority != -10 {
+			t.Fatalf("phone under both: %+v", p)
+		}
+		if n.Hotspot.SSID != "duck-2" || n.Hotspot.UUID != before || !n.Hotspot.Installed || !strings.Contains(sh(t, "cat /etc/NetworkManager/system-connections/quay-hotspot.nmconnection"), "psk=hotspot-pw") {
+			t.Fatalf("renamed: %+v", n.Hotspot)
+		}
+		if st, _ := s.Status(ctx); st == nil || st.Net == nil || st.Net.Away != "both" {
+			t.Fatal("status does not show the away plan")
+		}
+		if err := s.HotspotNow(ctx, sink, true); err != nil {
+			t.Fatal(err)
+		}
+		if got := sh(t, "cat /run/quay-hotspot/request"); got != "open" {
+			t.Fatalf("request: %q", got)
+		}
+	})
+
+	t.Run("mark a saved network as a phone hotspot and back", func(t *testing.T) {
+		uuid := profile(network(), "office").UUID
+		if err := s.WifiPhone(ctx, sink, uuid, true); err != nil {
+			t.Fatal(err)
+		}
+		if o := profile(network(), "office"); !o.Phone || !o.Autoconnect || o.Priority != -10 {
+			t.Fatalf("office as a phone: %+v", o)
+		}
+		if err := s.WifiPhone(ctx, sink, uuid, false); err != nil {
+			t.Fatal(err)
+		}
+		if o := profile(network(), "office"); o.Phone || !o.Autoconnect || o.Priority != 0 {
+			t.Fatalf("office again: %+v", o)
+		}
+	})
+
+	t.Run("phone only closes the open hotspot and removes the service", func(t *testing.T) {
+		setActive("quay-hotspot")
+		if st, err := s.Status(ctx); err != nil || st.Net == nil || !st.Net.Hotspot || !st.Net.Ours || st.Net.SSID != "duck-2" {
+			t.Fatalf("status on the hotspot: %v %+v", err, st.Net)
+		}
+		away("phone", "", "")
+		if shOK("test -e /etc/systemd/system/quay-hotspot.service || test -e /usr/local/lib/quay/quay-hotspot") {
+			t.Fatal("service files left behind")
+		}
+		time.Sleep(5 * time.Second) // the hotspot closes 3 s later, after Quay's command has returned
+		n := network()
+		if n.Hotspot.Active || !n.Hotspot.Configured || n.Hotspot.Installed || !profile(n, "Wei's phone").Autoconnect {
+			t.Fatalf("phone only: %+v", n)
+		}
+		if err := s.HotspotNow(ctx, sink, true); err == nil {
+			t.Fatal("open now worked without the service")
+		}
+		away("off", "", "")
+		if profile(network(), "Wei's phone").Autoconnect {
+			t.Fatal("off still joins the phone")
+		}
+	})
+
+	t.Run("remove saved networks", func(t *testing.T) {
+		setActive("Duck-Setup-home")
+		n := network()
+		if err := s.WifiRemove(ctx, sink, profile(n, "home").UUID); err == nil || !strings.Contains(err.Error(), "right now") {
+			t.Fatalf("removed the Wi-Fi in use: %v", err)
+		}
+		phone := profile(n, "Wei's phone").UUID
+		if err := s.WifiRemove(ctx, sink, phone); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.WifiRemove(ctx, sink, profile(n, "office").UUID); err != nil {
+			t.Fatal(err)
+		}
+		if saved("Wei's phone") || saved("office") || strings.Contains(sh(t, "cat /etc/quay/network.json"), phone) ||
+			shOK("ls /etc/NetworkManager/system-connections/quay-wifi-* 2>/dev/null | grep -q .") {
+			t.Fatal("not removed")
+		}
+	})
+}
+
+// TestSystemProfile dresses the fake board up as Duck OS: its release file and Duck Setup's hotspot,
+// set to come up at boot. Quay recognises the system, reads only the keys the profile names from
+// the release file, points out the hotspot in the network view, and its fix keeps the profile but
+// stops it coming up by itself.
+func TestSystemProfile(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	target := board.Target{Kind: board.KindSSH, Host: "127.0.0.1", Port: port, User: "arduino"}
+	s, err := core.Connect(ctx, target, &pw{}, filepath.Join(t.TempDir(), "known_hosts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sink, _ := collect(t)
+	sh(t, `echo '{"release": "0.1.0-rc6", "base_version": "20260528-558", "default_password": "LuwuDynamics"}' > /etc/duck-release.json`)
+	sh(t, `python3 -c "import json; p='/var/lib/fake-nm/state.json'; s=json.load(open(p)); s['profiles']['dddddddd-0000-0000-0000-000000000000']={'connection.id':'Duck-Setup-hotspot-dddddddd','connection.type':'802-11-wireless','connection.autoconnect':'yes','connection.autoconnect-priority':'999','802-11-wireless.ssid':'XGO-Duck','802-11-wireless.mode':'ap','802-11-wireless.hidden':'no','802-11-wireless-security.key-mgmt':'wpa-psk','file':''}; json.dump(s, open(p,'w'))"`)
+	defer sh(t, `rm -f /etc/duck-release.json; python3 -c "import json; p='/var/lib/fake-nm/state.json'; s=json.load(open(p)); s['profiles'].pop('dddddddd-0000-0000-0000-000000000000', None); json.dump(s, open(p,'w'))"`)
+
+	st, err := s.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.System == nil || st.System.ID != "duck-os" || st.System.Version != "0.1.0-rc6" || st.System.Base != "20260528-558" {
+		t.Fatalf("system: %+v", st.System)
+	}
+	exists, keys := sysprofile.Checks(sysprofile.Builtin().Profiles)
+	var out, errb strings.Builder
+	if err := s.T.Exec(ctx, "python3 -", strings.NewReader(remote.WithChecks(remote.Status, exists, keys)), &out, &errb); err != nil {
+		t.Fatal(err, errb.String())
+	}
+	if strings.Contains(out.String(), "LuwuDynamics") || !strings.Contains(out.String(), "0.1.0-rc6") {
+		t.Fatal("the status read more of the release file than the profile names")
+	}
+
+	n, err := s.Network(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(n.Findings) != 1 || n.Findings[0].ID != "duck-setup-hotspot" || n.Findings[0].Action == nil || !strings.Contains(n.Findings[0].TextZh, "XGO-Duck") {
+		t.Fatalf("findings: %+v", n.Findings)
+	}
+	if err := s.SystemFix(ctx, sink, "duck-setup-hotspot"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.Network(ctx); err != nil || len(n.Findings) != 0 {
+		t.Fatalf("after the fix: %v %+v", err, n)
+	}
+	if got := sh(t, `python3 -c "import json; print(json.load(open('/var/lib/fake-nm/state.json'))['profiles']['dddddddd-0000-0000-0000-000000000000']['connection.autoconnect'])"`); got != "no" {
+		t.Fatalf("autoconnect %q", got)
+	}
+	if err := s.SystemFix(ctx, sink, "duck-setup-hotspot"); err == nil || !strings.Contains(err.Error(), "does not apply") {
+		t.Fatalf("fixed twice: %v", err)
+	}
 }
 
 // metaField encodes an ONNX metadata_props entry (ModelProto field 14). Appending it to a model is

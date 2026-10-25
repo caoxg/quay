@@ -1,6 +1,9 @@
 package profile
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeRepo(t *testing.T) {
 	want := "github.com/luwudynamics/xgoduck_runtime_arduino"
@@ -64,5 +67,21 @@ func TestScriptAndActions(t *testing.T) {
 	d := ByID("xgoduck")
 	if d.Uninstall == nil || d.Uninstall.Run == "" || len(d.Actions) != 2 || d.BeforeStart.DescriptionZH == "" {
 		t.Fatalf("duck profile: %+v", d)
+	}
+}
+
+func TestIcon(t *testing.T) {
+	for _, ok := range []string{"icon: 🦆\n", "icon: 🧑‍💻\n", "icon: '<svg viewBox=\"0 0 8 8\"><circle r=\"4\"/></svg>'\n"} {
+		if _, err := Parse([]byte(ok)); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"icon: a long piece of text\n", "icon: '<img src=x>'\n", "icon: '<svg><circle r=\"4\"/>'\n"} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
+	if d := ByID("xgoduck"); !strings.HasPrefix(d.Icon, "<svg") {
+		t.Fatalf("duck profile icon: %.40q", d.Icon)
 	}
 }

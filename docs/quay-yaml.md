@@ -10,6 +10,7 @@ Every section is optional. Unknown keys are an error, so typos do not pass silen
 id: weather                     # short identifier (used by built-in profiles)
 name: Weather Station           # display name of the profile
 description: BME280 charts in the browser.
+icon: 🌦️                        # an emoji, or inline <svg> markup (see below)
 folder: weather_station         # default install folder under ~/ArduinoApps
 
 system:
@@ -60,7 +61,7 @@ uninstall: |
 2. A built-in profile whose `match.repos` contains the app's repository URL.
 3. A built-in profile whose `match.app_names` contains the `name:` from `app.yaml`.
 
-The first hit wins. `quay profiles` lists the built-in profiles. They live in [`internal/profile/profiles/`](../internal/profile/profiles) and exist only for apps that do not ship their own file yet.
+The first hit wins. `quay profiles` lists the built-in profiles. They are published in [quay-profiles](https://github.com/caoxg/quay-profiles) (`apps/`), separately from Quay, and exist only for apps that do not ship their own file yet.
 
 ## How hooks run
 
@@ -77,6 +78,19 @@ Each hook is a bash script (`bash -c`). It can span several lines with YAML's `|
 For `sudo`, Quay tries passwordless sudo first, then the SSH login password, then asks the user. The script is uploaded to a temporary file and runs with `sudo bash FILE`, so it never appears in the process list with its contents.
 
 ## Sections
+
+### `icon`
+
+Shown on the app's card, in the catalog and in the install preview, in place of the `icon` from `app.yaml`. Either an emoji, or a small SVG written inline:
+
+```yaml
+icon: |
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+    <circle cx="32" cy="32" r="24" fill="#f6c700"/>
+  </svg>
+```
+
+The SVG is drawn as an image (scripts and external references in it are ignored) and may be up to 16 KB. Use a square `viewBox`; Quay draws it at about 36 px, so keep it simple.
 
 ### `system`
 
@@ -202,7 +216,7 @@ match:
 
 ## A complete example
 
-The built-in XGO-Duck profile, [`internal/profile/profiles/xgoduck.yaml`](../internal/profile/profiles/xgoduck.yaml), uses every section:
+The built-in XGO-Duck profile, [`apps/xgoduck.yaml`](https://github.com/caoxg/quay-profiles/blob/main/apps/xgoduck.yaml) in quay-profiles, uses every section:
 
 - `system` moves the Linux↔MCU router link to 2 Mbps.
 - `before_start` patches the pinned RouterBridge and RPClite libraries and forces a firmware rebuild when they change.

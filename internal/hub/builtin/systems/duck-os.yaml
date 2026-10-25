@@ -1,0 +1,35 @@
+# Duck OS: Luwu Dynamics' image for XGO-Duck, built on Arduino's UNO Q Debian image and set up
+# with their Duck Setup app (which talks to the helpers in /usr/local/lib/duck over USB).
+id: duck-os
+name: Duck OS
+vendor: Luwu Dynamics
+homepage: https://github.com/LuwuDynamics
+description: Luwu Dynamics' image for the XGO-Duck robot, built on Arduino's UNO Q Debian image and set up with the Duck Setup app.
+description_zh: 陆吾智能给 XGO-Duck 机器人做的系统镜像，基于 Arduino 的 UNO Q Debian 镜像，用 Duck Setup 设置。
+detect:
+  files: [/etc/duck-release.json]
+version:
+  file: /etc/duck-release.json
+  json: release
+base:
+  file: /etc/duck-release.json
+  json: base_version
+notes:
+  # Duck Setup's hotspot (/usr/local/lib/duck/configure-network.py): a profile
+  # "Duck-Setup-hotspot-<uuid8>", an access point on 10.42.0.1 that comes up by itself with
+  # priority 999, so at every boot it wins over any Wi-Fi and over Quay's away plan.
+  - id: duck-setup-hotspot
+    show_in: network
+    when:
+      nm_profile:
+        id_prefix: Duck-Setup-hotspot-
+        mode: ap
+        autoconnect: true
+    text: Duck Setup's hotspot "{ssid}" comes up at every boot, ahead of any Wi-Fi, and wins over the away plan here.
+    text_zh: Duck Setup 设的热点「{ssid}」每次开机都会打开，排在所有 Wi-Fi 前面，会盖过这里的设置。
+    action:
+      do: nm_autoconnect_off
+      label: Don't open it at boot
+      label_zh: 不让它开机自动打开
+      confirm: The board keeps Duck Setup's hotspot "{ssid}" but stops opening it by itself. The current connection stays as it is, and Duck Setup can still switch to the hotspot later.
+      confirm_zh: 板子保留 Duck Setup 的热点「{ssid}」，只是不再开机自动打开。现在的连接不变，以后照样可以用 Duck Setup 切过去。

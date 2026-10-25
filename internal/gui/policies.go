@@ -17,6 +17,14 @@ type PolicyCatalog struct {
 	Entries  []policystore.Entry `json:"entries"`
 	Problems []string            `json:"problems"`
 	Indexes  []string            `json:"indexes"` // the community index first, then the user's
+	Sources  []CatalogSource     `json:"sources"` // the same indexes, named for the dialog
+}
+
+// CatalogSource names one index the catalog was read from.
+type CatalogSource struct {
+	URL  string `json:"url"`
+	Name string `json:"name"`
+	Page string `json:"page,omitempty"`
 }
 
 // PolicyRequest names a policy to check or install: an index entry, or a model file on this computer.
@@ -52,11 +60,14 @@ func (s *Service) PolicyCatalog(app string, index *profile.IndexSource) string {
 		}
 		src := policystore.Sources([]*profile.Profile{{Policies: &profile.Policies{Index: index}}}, cfg.PolicyIndexes)
 		urls := make([]string, len(src))
+		named := make([]CatalogSource, len(src))
 		for i, x := range src {
 			urls[i] = x.URL
+			named[i] = CatalogSource{URL: x.URL}
+			named[i].Name, named[i].Page = policystore.Describe(x.URL)
 		}
 		r := s.policyStore().Load(ctx, src)
-		return PolicyCatalog{Entries: policystore.ForApp(r.Entries, app), Problems: r.Problems, Indexes: urls}, nil
+		return PolicyCatalog{Entries: policystore.ForApp(r.Entries, app), Problems: r.Problems, Indexes: urls, Sources: named}, nil
 	})
 }
 

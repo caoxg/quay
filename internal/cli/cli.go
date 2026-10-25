@@ -28,11 +28,13 @@ import (
 	"github.com/caoxg/quay/internal/config"
 	"github.com/caoxg/quay/internal/core"
 	"github.com/caoxg/quay/internal/discover"
+	"github.com/caoxg/quay/internal/hub"
 	"github.com/caoxg/quay/internal/legal"
 	"github.com/caoxg/quay/internal/mirror"
 	"github.com/caoxg/quay/internal/profile"
 	"github.com/caoxg/quay/internal/relay"
 	"github.com/caoxg/quay/internal/source"
+	"github.com/caoxg/quay/internal/sysprofile"
 	"github.com/caoxg/quay/internal/version"
 )
 
@@ -53,6 +55,7 @@ func Execute(gui func() error) int {
 		Version:       version.Version,
 	}
 	isTTY = term.IsTerminal(int(os.Stdout.Fd())) && enableANSI(os.Stdout)
+	hub.Default = &hub.Loader{Dir: config.ProfileCacheDir()}
 	root.PersistentFlags().StringVarP(&flagBoard, "board", "b", "", "saved board to use (default: the default board)")
 	root.PersistentFlags().StringVarP(&flagHost, "host", "H", "", "board address instead of a saved board: user@host[:port], adb or adb:SERIAL")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "print machine-readable JSON events")
@@ -67,9 +70,9 @@ func Execute(gui func() error) int {
 		simpleCmd("restart", "Restart an app", func(ctx context.Context, s *core.Session, sink core.Sink, app string, force bool) error {
 			return s.Restart(ctx, sink, app, force)
 		}),
-		autostartCmd(), logsCmd(), prepareCmd(), mirrorCmd(), relayCmd(), upgradeCmd(), renameCmd(), uploadKeyCmd(),
+		autostartCmd(), logsCmd(), prepareCmd(), mirrorCmd(), relayCmd(), wifiCmd(), hotspotCmd(), upgradeCmd(), renameCmd(), uploadKeyCmd(),
 		backupCmd(), restoreCmd(), exportCmd(), eraseCmd(),
-		policyCmd(), openCmd(), shellCmd(), profilesCmd(), licensesCmd())
+		policyCmd(), openCmd(), shellCmd(), systemCmd(), profilesCmd(), licensesCmd())
 	if gui != nil {
 		root.AddCommand(&cobra.Command{Use: "gui", Short: "Open the Quay app", RunE: func(*cobra.Command, []string) error { return gui() }})
 	}
@@ -1373,21 +1376,108 @@ func licensesCmd() *cobra.Command {
 }
 
 func profilesCmd() *cobra.Command {
-	return &cobra.Command{Use: "profiles", Short: "List the built-in app profiles", RunE: func(*cobra.Command, []string) error {
-		for _, p := range profile.Builtins() {
-			fmt.Printf("%s  %s\n", bold(p.Name), dim("("+p.ID+")"))
-			if p.Description != "" {
-				fmt.Printf("  %s\n", p.Description)
+	var refresh bool
+	c := &cobra.Command{
+		Use:   "profiles",
+		Short: "List Quay's app and system profiles (from the quay-profiles repository)",
+		Long: "App profiles tell Quay what an app needs when the app has no quay.yaml of its own; system profiles\n" +
+			"recognise board systems other than the stock image (Duck OS, …) and what they do differently.\n" +
+			"Both come from github.com/caoxg/quay-profiles, independently of Quay releases: Quay has a copy\n" +
+			"built in and fetches a newer one about twice a day. --refresh fetches now.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if refresh {
+				ctx, cancel := signalContext()
+				defer cancel()
+				if err := hub.Default.Refresh(ctx); err != nil {
+					fmt.Println(yellow("! ") + "could not fetch the profiles: " + err.Error())
+				}
 			}
-			if p.Source != nil {
-				fmt.Printf("  %s %s\n", dim("repo"), p.Source.Repo)
+			snap := hub.Get()
+			fmt.Println(dim("profiles of " + snap.Index.Updated + ", " + snap.Source))
+			fmt.Println(bold("App profiles"))
+			for _, p := range profile.Builtins() {
+				fmt.Printf("  %s  %s\n", bold(p.Name), dim("("+p.ID+")"))
+				if p.Description != "" {
+					fmt.Printf("    %s\n", p.Description)
+				}
+				if p.Source != nil {
+					fmt.Printf("    %s %s\n", dim("repo"), p.Source.Repo)
+				}
+				if p.System != nil {
+					fmt.Printf("    %s %s\n", dim("system"), firstLine(p.System.Description))
+				}
 			}
-			if p.System != nil {
-				fmt.Printf("  %s %s\n", dim("system"), firstLine(p.System.Description))
+			set := sysprofile.FromSnapshot(snap)
+			fmt.Println(bold("System profiles"))
+			for _, p := range set.Profiles {
+				fmt.Printf("  %s  %s\n", bold(p.Name), dim("("+p.ID+")"))
+				if p.Description != "" {
+					fmt.Printf("    %s\n", p.Description)
+				}
 			}
-		}
-		return nil
-	}}
+			for _, pr := range set.Problems {
+				fmt.Println(yellow("! ") + pr)
+			}
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&refresh, "refresh", false, "fetch the newest profiles first")
+	return c
+}
+
+func systemCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "system [fix ID]",
+		Short: "Show which system the board runs and what a system profile says about it",
+		Long: "Recognises board systems other than the stock Arduino image (Duck OS, …) with Quay's system\n" +
+			"profiles (quay profiles), and lists what they do differently. `fix ID` applies the built-in\n" +
+			"action a finding offers (needs sudo).",
+		Example: "  quay system\n  quay system fix duck-setup-hotspot",
+		Args:    cobra.MaximumNArgs(2),
+		RunE: func(_ *cobra.Command, a []string) error {
+			if len(a) > 0 && (a[0] != "fix" || len(a) != 2) {
+				return errors.New("use `quay system` or `quay system fix ID`")
+			}
+			return withSession(func(ctx context.Context, s *core.Session, sink core.Sink) error {
+				if len(a) == 2 {
+					return s.SystemFix(ctx, sink, a[1])
+				}
+				st, err := s.Status(ctx)
+				if err != nil {
+					return err
+				}
+				n, err := s.Network(ctx)
+				if err != nil {
+					return err
+				}
+				if flagJSON {
+					return printJSON(map[string]any{"system": st.System, "findings": append(st.Findings, n.Findings...)})
+				}
+				if st.System == nil {
+					fmt.Println("system: " + bold(orDash(st.OS.Pretty)) + dim("  (no system profile recognises it: the stock image, or one Quay does not know)"))
+					return nil
+				}
+				d := st.System
+				line := bold(strings.TrimSpace(d.Name + " " + d.Version))
+				if d.Base != "" {
+					line += dim("  based on Arduino's image " + d.Base)
+				}
+				fmt.Println("system: " + line)
+				if d.Vendor != "" {
+					fmt.Println(dim("  by " + d.Vendor + "  " + d.Homepage))
+				}
+				for _, f := range append(st.Findings, n.Findings...) {
+					fmt.Println(yellow("! ") + f.Text)
+					if f.Action != nil {
+						fmt.Printf("  %s %s\n", dim(f.Action.Label+":"), "quay system fix "+f.ID)
+					}
+				}
+				return nil
+			})
+		},
+	}
+	return c
 }
 
 func firstLine(s string) string {

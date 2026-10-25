@@ -3,8 +3,10 @@
 package remote
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/caoxg/quay/internal/board"
@@ -49,8 +51,39 @@ func RootScript(body string, vars map[string]string) string {
 	return b.String()
 }
 
+// WithChecks prepends to a status/network script the board files a system profile asks about:
+// which must be checked for existence, and which JSON keys to read (see sysFiles).
+func WithChecks(script string, exists []string, keys map[string][]string) string {
+	b, _ := json.Marshal(map[string]any{"exists": exists, "keys": keys})
+	return "QUAY_CHECKS = " + strconv.Quote(string(b)) + "\n" + script
+}
+
+// sysFiles answers WithChecks: {path: {"exists": bool, "json": {key: value}}}.
+const sysFiles = `
+def sys_files():
+    import json, os
+    try:
+        c = json.loads(globals().get("QUAY_CHECKS") or "{}")
+    except Exception:
+        c = {}
+    res = {}
+    for p in c.get("exists") or []:
+        res[p] = {"exists": os.path.exists(p)}
+    for p, keys in (c.get("keys") or {}).items():
+        r = res.setdefault(p, {"exists": os.path.exists(p)})
+        try:
+            if os.path.getsize(p) <= 65536:
+                with open(p) as f:
+                    d = json.load(f)
+                if isinstance(d, dict):
+                    r["json"] = {k: d[k] for k in keys if isinstance(d.get(k), (str, int, float, bool))}
+        except Exception:
+            pass
+    return res
+`
+
 // Status prints one JSON document describing the board and its user apps (python3 on the board).
-const Status = `
+var Status = sysFiles + `
 import base64, glob, json, os, pathlib, pwd, socket, subprocess
 
 def sh(*cmd, timeout=20):
@@ -150,6 +183,37 @@ for line in read(os.path.join(home, ".ssh", "authorized_keys"), "\n ").splitline
 out["authorizedKeys"] = keys
 out["debianManaged"] = os.path.isdir("/var/lib/quay/apt-orig")
 out["relay"] = os.path.exists("/etc/apt/apt.conf.d/80quay-relay")
+
+def nm_values(*args):
+    rc, o, _ = sh("nmcli", "-t", *args, timeout=10)
+    res = {}
+    for line in (o if rc == 0 else "").splitlines():
+        k, _, v = line.partition(":")
+        res[k] = v.replace("\\:", ":").replace("\\\\", "\\")
+    return res
+nv = nm_values("-f", "GENERAL.STATE,GENERAL.CONNECTION,GENERAL.CON-UUID", "device", "show", "wlan0")
+if nv:
+    st = nv.get("GENERAL.STATE", "").split(" ")[0]
+    net = {"state": int(st) if st.isdigit() else 0, "connection": nv.get("GENERAL.CONNECTION", ""), "ssid": "", "hotspot": False,
+           "away": "off"}
+    try:
+        with open("/etc/quay/network.json") as f:
+            a = json.load(f).get("away") or "off"
+            net["away"] = "board" if a == "own" else a
+    except Exception:
+        pass
+    if nv.get("GENERAL.CON-UUID", "--") not in ("", "--"):
+        cv = nm_values("-f", "802-11-wireless.mode,802-11-wireless.ssid", "connection", "show", "uuid", nv["GENERAL.CON-UUID"])
+        net["hotspot"] = cv.get("802-11-wireless.mode") == "ap"
+        net["ssid"] = cv.get("802-11-wireless.ssid", "")
+    net["ours"] = net["hotspot"] and net["connection"] == "quay-hotspot"
+    if net["ours"]:
+        try:
+            with open("/run/quay-hotspot/state.json") as f:
+                net["stations"] = json.load(f).get("stations")
+        except Exception:
+            pass
+    out["net"] = net
 if os.path.isdir(apps_dir):
     for name in sorted(os.listdir(apps_dir)):
         d = os.path.join(apps_dir, name)
@@ -172,6 +236,7 @@ if os.path.isdir(apps_dir):
         except Exception:
             pass
         out["folders"].append(f)
+out["sysFiles"] = sys_files()
 print(json.dumps(out))
 `
 

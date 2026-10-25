@@ -79,6 +79,7 @@ Quay 是给 Arduino UNO Q 的 Linux 一侧用的桌面应用，同时也是命�
 - **自动找到板子。** 局域网里的板子会自己出现在列表里（它们通过 mDNS 广播 `_arduino._tcp`）。板子在 Quay 里的名字就是它自己的主机名，也就是 App Lab 显示的名字和 `名字.local`；在 Quay 里改名就是给板子改名。
 - **不用 App Lab 做系统更新。** Quay 会列出这次更新要下载什么（新板子往往有几百 MB），然后调用板子自己的 `arduino-app-cli system update`；也可以跳过板载桌面的包（App Lab、Chromium），用电脑操作板子时用不到它们。更新在板子上独立运行，Wi‑Fi 断了也不会中断。
 - **板子下载慢时的加速。** `quay mirror cn` 先从板子上给 8 个国内镜像测速，把 pip、uv 和 apt 的 Debian 软件包指向最快的那个；apt 还会配上测速靠前的其他镜像和官方源，某个镜像坏了会自动换下一个。`quay relay on` 让板子在 Quay 连着的时候经你的电脑（及其代理）下载。两者都是独立、可撤销的命令，不会被顺带执行。
+- **出门也能连上。** 在常用 Wi‑Fi 之外再存一个手机热点，然后选好离开常用 Wi‑Fi 时板子怎么做：板子开热点（手机连上后打开 `http://10.42.0.1`）、连手机热点、先找手机热点、找不到再由板子开热点，或者干脆不联网。回到 Wi‑Fi 范围后会自己连回去。详见[Wi‑Fi 和出门时的策略](#wifi-和出门时的策略)。
 - **SSH 或 USB。** Wi‑Fi/有线走 SSH（agent、密钥文件或密码），也可以用 USB（`adb`）。
 - **原生、轻量。** 界面使用系统自带的 WebView（macOS、Linux 上是 WebKit，Windows 上是 WebView2），基于 [Wails v3](https://v3.wails.io)，不打包 Chromium。同一个程序既是桌面应用也是 CLI。
 
@@ -110,6 +111,7 @@ sudo ln -s /Applications/Quay.app/Contents/MacOS/quay /usr/local/bin/quay
 2. **安装应用。** 从「定制」里选（带 Quay 配置的 App），或粘贴 git 地址（GitHub 可以只写 `owner/repo`），或选本地文件夹。在动板子之前，Quay 会先给你看它找到了什么：应用名、版本、commit、配置。
 3. **运行。** 每张应用卡片显示状态、来源、数据文件、是否开机运行。**控制台** 按钮打开应用自己的网页界面。⋯ 菜单里有更新、日志、备份、恢复、导出、系统设置和删除。
 4. **保持系统最新。** 「系统」卡片显示待安装的系统更新；点开能看到具体内容，可以选择全部更新或只更新 Arduino 的包，然后安装。顶部的板子菜单（⋯）里还可以重命名板子。
+5. **带出门。** 点「网络」卡片打开板子的 Wi‑Fi 设置：常用 Wi‑Fi、手机热点，以及离开常用 Wi‑Fi 时板子怎么做（详见[Wi‑Fi 和出门时的策略](#wifi-和出门时的策略)）。
 
 耗时的操作在 **活动** 面板里显示步骤和日志，运行期间可以继续做别的事。
 
@@ -133,9 +135,11 @@ quay [命令] [参数]
            open 应用 · backup 应用 · restore 应用 文件 · export 应用 · erase 应用
 板子系统   upgrade [--check] [--arduino-only] [--skip-desktop] · rename 名字 · prepare 应用 [--revert]
            mirror cn|off|test|list · relay on|off
+网络       wifi [ls|scan] · wifi add 名称 [--phone] [--hidden] [--open] · wifi set 名称 --phone[=false] · wifi rm 名称
+           hotspot [board|phone|both|off] [--name 名称] [--new-password] · hotspot open|close
 策略       policy list 应用 · policy search [配置] · policy install 应用 ID|文件.onnx [--slot 插槽] · policy restore 应用 [插槽…]
            policy inspect 文件.onnx [--app 配置] · policy index [add|rm 网址]
-其他       refs 仓库 · shell · profiles · licenses · gui
+其他       refs 仓库 · shell · system [fix ID] · profiles [--refresh] · licenses · gui
 全局       -b/--board 名称 · -H/--host 地址 · --json
 ```
 
@@ -177,6 +181,10 @@ quay upgrade --skip-desktop
 
 # 重命名板子（变成 goose.local；App Lab 里也会显示新名字）
 quay rename goose
+
+# 出门：存下手机热点；手机热点开着就连手机，没开就由板子开热点
+quay wifi add "小王的 iPhone" --phone
+quay hotspot both
 ```
 
 加上 `--json`，任何命令的进度都会变成每行一个 JSON 事件，方便脚本或其他前端使用。
@@ -200,6 +208,23 @@ quay rename goose
 - `quay upgrade`：做板子的系统更新。先刷新软件包列表，列出要安装什么、要下载多少，确认后执行 `arduino-app-cli system update`，也就是 App Lab 做的那个更新。`--arduino-only` 只更新 Arduino 的包；`--skip-desktop` 跳过板载 App Lab 和 Chromium（新板子上约 290 MB）。板子系统允许这些命令免密执行。更新在板子上独立运行：连接断了的话，再运行一次 `quay upgrade` 就能接着看进度。
 - `quay upload-key`：把你的 SSH 公钥（`~/.ssh/id_ed25519.pub`、`id_ecdsa.pub` 或 `id_rsa.pub`）追加到板子的 `~/.ssh/authorized_keys`，作用和 `ssh-copy-id` 一样，之后 Quay 和 `ssh` 登录都不用再输密码。`board add --upload-key`（应用里「添加板子」对话框的勾选项）会在添加时顺带完成；板子菜单里也有这一项。
 - `quay rename 名字`：用 App Lab 的方式（`arduino-app-cli system set-name`）给板子改名，重新以 `名字.local` 在网络上广播，并更新 Quay 里保存的板子。
+
+### Wi‑Fi 和出门时的策略
+
+板子在**常用 Wi‑Fi**（家里、办公室、教室）范围内就会自动连上。`quay wifi` 列出已保存的网络，`quay wifi scan` 列出附近的网络，`quay wifi add 名称` 保存一个（会问密码），`quay wifi rm 名称` 删除一个。添加网络不会改变当前连接。
+
+用 `--phone` 保存的网络是**手机热点**：板子只按**出门时的策略**连它，而且排在所有常用 Wi‑Fi 后面。已有的网络可以用 `quay wifi set 名称 --phone`（或 `--phone=false`）改过来。出门时的策略，就是附近没有任何常用 Wi‑Fi 时板子怎么做：
+
+| `quay hotspot …` | 离开常用 Wi‑Fi 后，板子…… |
+|---|---|
+| `off` | 不联网，手机热点也不会自动连 |
+| `board` | 板子开热点。手机连上后打开 `http://10.42.0.1`（再加上 App 的端口，比如 `http://10.42.0.1:9527`）。手机热点不会自动连。 |
+| `phone` | 手机开着热点时连上去。手机照常能上网；板子的地址在手机热点的「已连接设备」里找。 |
+| `both` | 手机热点开着就连手机，没开就由板子开热点 |
+
+`board` 和 `both` 会在板子上装一个小服务 [`quay-hotspot`](internal/remote/hotspot/README.md)（需要 sudo）。第一次会问热点密码；热点名默认用板子的名字，也可以用 `--name` 指定。开机 45 秒还没有 Wi‑Fi，或者断开 Wi‑Fi 一分钟后，服务就会开热点。没有设备连着热点时，它每 5 分钟找一次 Wi‑Fi，找到就连回去；有手机连着时绝不关热点。`quay hotspot open` 立即开热点试试（板子会离开现在的 Wi‑Fi，当前连接会断；没人连上来的话，大约 5 分钟内会连回去）；`quay hotspot close` 立即连回 Wi‑Fi。`off` 和 `phone` 会删掉这个服务，但保留热点名和密码，以后切回来不用重新输入。Duck Setup 设置的热点，Quay 不会去动。
+
+在应用里，点「网络」卡片，以上设置都在同一个对话框里。
 
 ### 策略
 
@@ -242,7 +267,13 @@ safety: { url: http://127.0.0.1:9527/api/status, field: enabled, message: 先关
 web: { port: 9527 }
 ```
 
-完整说明见 [docs/quay-yaml.md](docs/quay-yaml.md)（英文）。对于还没有自带 `quay.yaml` 的已知应用，Quay 内置了配置（`quay profiles` 可列出），目前只有一份，用于 [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino)。它是为 Quay 编写的，只调用那个仓库里现成的脚本，不由陆吾智能维护。仓库里的 `quay.yaml` 永远优先于内置配置。
+完整说明见 [docs/quay-yaml.md](docs/quay-yaml.md)（英文）。对于还没有自带 `quay.yaml` 的已知应用，Quay 有自己的配置（`quay profiles` 可列出）。这些配置单独发布在 [quay-profiles](https://github.com/caoxg/quay-profiles) 仓库里：Quay 自带一份，每天大约两次去拉新版，所以改配置不用等 Quay 发版。目前只有一份，用于 [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino)。它是为 Quay 编写的，只调用那个仓库里现成的脚本，不由陆吾智能维护。App 仓库里的 `quay.yaml` 永远优先。
+
+### 板子的系统
+
+同一个仓库里还有**系统配置**，用来认出原版 Arduino 镜像以外的系统，比如 Duck OS。系统配置靠系统自带的某个文件认出它（Duck OS 是 `/etc/duck-release.json`），并列出这个系统有哪些和原版不同、跟 Quay 有关的地方。比如 Duck OS 上，Duck Setup 设的热点每次开机都会打开，会盖过 Quay 的出门策略。认出后，「系统」卡片会显示系统名和版本，每条差异显示在相关的地方，并附上处理按钮。`quay system` 显示同样的内容，`quay system fix ID` 执行处理。
+
+从网上拉来的配置只能做描述：查哪些文件（以及读哪些 JSON 字段，别的一概不读）、匹配哪些网络配置、用 Quay 内置的哪种动作处理（让某个网络配置不再开机自动连接；删除一个没在用的网络配置）。它没法让 Quay 执行它自己写的命令，每次处理都要你点按钮确认。
 
 ## 文件与设置
 
@@ -253,7 +284,10 @@ web: { port: 9527 }
 | 备份 | 同目录下的 `backups/`，除非你另选位置 |
 | 仓库缓存 | 用户缓存目录下的 `Quay/repos` |
 | 下载的策略和索引副本 | 用户缓存目录下的 `Quay/policies` |
+| 配置仓库的最新副本 | 用户缓存目录下的 `Quay/profiles` |
 | 已装的策略（在板子上） | `~/ArduinoApps/应用/data/quay-policies/`（模型、原版备份、`state.json`） |
+| 出门时的策略和手机热点（在板子上） | `/etc/quay/network.json`；Quay 保存的网络是 `/etc/NetworkManager/system-connections/` 里的 NetworkManager 配置文件 `quay-wifi-*.nmconnection` 和 `quay-hotspot.nmconnection` |
+| 热点服务（在板子上） | `/usr/local/lib/quay/quay-hotspot`、`quay-hotspot.service`；运行状态在 `/run/quay-hotspot/` |
 
 | 环境变量 | 作用 |
 |---|---|

@@ -40,6 +40,12 @@ const mockState = {
   hostname: 'duck',
   relay: false,
   relayUpstream: '',
+  // Wi-Fi: saved networks (the first is in use), the automatic hotspot, devices on it
+  wifi: [{ uuid: 'u-home', id: 'Duck-Setup-home', ssid: 'home', mode: 'infrastructure', hidden: false, autoconnect: true, priority: 0, secure: true, phone: false }],
+  wifiActive: 'u-home',
+  away: 'off',
+  hotspot: null, // { ssid } once saved
+  onHotspot: false,
   appcli: '0.13.0',
   upgraded: '',
   apps: [
@@ -60,6 +66,7 @@ const mockState = {
 };
 const duckProfile = {
   id: 'xgoduck', name: 'XGO-Duck', description: 'Duck-shaped biped robot (Microduck lineage) — walking, get-up and pick policies at 50 Hz.', folder: 'xgoduck_runtime_arduino',
+  icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"> <g stroke="#2b2f33" stroke-width="1.6" stroke-linejoin="round"> <path d="M21 44h8l-1 7h-6z" fill="#d5d8dc"/> <rect x="22.5" y="50" width="4.5" height="7" fill="#2b2f33"/> <rect x="18" y="56.5" width="12" height="4" rx="1.5" fill="#d9ab00"/> <rect x="14.5" y="33" width="4" height="13" rx="1" fill="#2f6f8f"/> <rect x="18" y="33.5" width="22" height="12" rx="3.5" fill="#fff"/> <path d="M30 44h8.5l-1 7h-6.5z" fill="#fff"/> <rect x="32" y="50" width="4.5" height="7" fill="#2b2f33"/> <rect x="30" y="56.5" width="13.5" height="4" rx="1.5" fill="#f6c700"/> <path d="M28 27h5.5l2.5 8h-5.5z" fill="#2b2f33"/> <path d="M9.5 24.5h50.5a1.8 1.8 0 0 1 0 4H9.5a1.8 1.8 0 0 1 0-4z" fill="#f6c700"/> <path d="M12 25.5C8.5 25.5 7.5 22 8.5 18.5C10 13.5 15 11.5 22 10.5L45 7.5C53 6.6 57.5 10.5 57.5 17V25.5Z" fill="#fff"/> <circle cx="48.5" cy="16" r="4" fill="#2b2f33"/> </g> <circle cx="49.4" cy="15.1" r="1.4" fill="#fff"/> </svg>',
   source: { repo: 'https://github.com/LuwuDynamics/xgoduck_runtime_arduino' }, origin: 'builtin',
   system: { description: 'Sets the Linux↔MCU router serial link to 2 Mbps (the runtime\'s tools/router-2m.sh). The setting is global: other apps that expect the stock 115200 baud stop working until it is reverted.', descriptionZh: '把 Linux 和 MCU 之间的路由串口提速到 2 Mbps（运行时自带的 tools/router-2m.sh）。这是全板设置：其他按默认 115200 波特率工作的 App 在撤销前都会失灵。', check: '…', apply: 'bash tools/router-2m.sh', revert: '…', stopApp: true },
   beforeStart: { run: 'python3 tools/prepare-bridge.py', resolveOnFailure: true, description: 'Patches the RouterBridge and RPClite libraries the sketch uses (a bigger RPC stack, bounded message framing) and rebuilds the firmware when they change.', descriptionZh: '给固件用到的 RouterBridge、RPClite 库打补丁（更大的 RPC 栈、限定长度的消息帧），库有变化时自动重新编译固件。' },
@@ -134,7 +141,33 @@ function statusData(board) {
     mirror: { pip: mockState.mirror.pypi, pipFallback: mockState.mirror.pipFallback, uv: mockState.mirror.pypi, debian: mockState.mirror.debian || 'http://deb.debian.org/debian', debianFallback: mockState.mirror.debianFallback || [], managed: !!(mockState.mirror.pypi || mockState.mirror.debian) },
     authorizedKeys: mockState.keyUploaded ? ['AAAAC3NzaC1lZDI1NTE5AAAAIMockKey'] : [],
     relay: { installed: mockState.relay, active: mockState.relay },
+    net: netSummary(),
+    ...(DUCKOS ? { system: { id: 'duck-os', name: 'Duck OS', version: '0.1.0-rc6', base: '20260528-558', vendor: 'Luwu Dynamics' }, findings: [] } : {}),
     apps: JSON.parse(JSON.stringify(mockState.apps)), broken: [], checkedAt: Date.now(),
+  };
+}
+
+// ?duckos: the board runs Duck OS, with Duck Setup's hotspot still set to come up at boot.
+const DUCKOS = new URLSearchParams(location.search).has('duckos');
+function netSummary() {
+  const h = mockState.hotspot, w = mockState.wifi.find((x) => x.uuid === mockState.wifiActive);
+  if (mockState.onHotspot && h) return { state: 100, connection: 'quay-hotspot', ssid: h.ssid, hotspot: true, ours: true, away: mockState.away, stations: 1 };
+  return { state: w ? 100 : 30, connection: w?.id || '', ssid: w?.ssid || '', hotspot: false, ours: false, away: mockState.away };
+}
+function networkData() {
+  const h = mockState.hotspot, own = mockState.away === 'board' || mockState.away === 'both';
+  return {
+    away: mockState.away, iface: 'wlan0',
+    ...(DUCKOS ? { system: { id: 'duck-os', name: 'Duck OS', version: '0.1.0-rc6', base: '20260528-558' },
+      findings: mockState.duckSetupHotspotOff ? [] : [{ system: 'duck-os', id: 'duck-setup-hotspot', showIn: 'network',
+        text: 'Duck Setup\'s hotspot "XGO-Duck" comes up at every boot, ahead of any Wi-Fi, and wins over the away plan here.',
+        textZh: 'Duck Setup 设的热点「XGO-Duck」每次开机都会打开，排在所有 Wi-Fi 前面，会盖过这里的设置。',
+        action: { do: 'nm_autoconnect_off', label: 'Don\'t open it at boot', labelZh: '不让它开机自动打开',
+          confirm: 'The board keeps Duck Setup\'s hotspot "XGO-Duck" but stops opening it by itself.', confirmZh: '板子保留 Duck Setup 的热点「XGO-Duck」，只是不再开机自动打开。现在的连接不变，以后照样可以用 Duck Setup 切过去。' } }] } : { findings: [] }), nmcli: true, ap: true, state: 100, active: mockState.onHotspot ? 'u-hot' : mockState.wifiActive, ip: mockState.onHotspot ? '10.42.0.1' : '192.168.1.42',
+    profiles: mockState.wifi.map((p) => ({ ...p, active: !mockState.onHotspot && p.uuid === mockState.wifiActive,
+      autoconnect: p.phone ? mockState.away === 'phone' || mockState.away === 'both' : p.autoconnect, priority: p.phone ? -10 : p.priority })),
+    hotspot: { configured: !!h, installed: own, enabled: own, running: own, ssid: h?.ssid || '', uuid: h ? 'u-hot' : '', active: !!(h && mockState.onHotspot),
+      state: own ? { state: mockState.onHotspot ? 'hotspot' : 'wifi', stations: mockState.onHotspot ? 1 : null, since: 0 } : null },
   };
 }
 
@@ -261,6 +294,24 @@ const mock = {
   }),
   Relay: (b, on, up) => simulate('relay', b, '', [['relay', on ? 'Download through this computer while Quay is connected' : 'Download directly again', [on ? "apt downloads through Quay's computer whenever Quay is connected" : 'apt downloads directly again'], 900]],
     null, { after: () => { mockState.relay = on; if (on) mockState.relayUpstream = up || ''; } }),
+  Network: (b) => simulate('network', b, '', [], () => networkData()),
+  WifiScan: (b) => simulate('wifiscan', b, '', [['scan', 'Scan', [], 900]], () => (mockState.onHotspot ? [] : [
+    { ssid: 'home', signal: 72, security: 'WPA2' }, { ssid: 'Wei’s iPhone', signal: 58, security: 'WPA2' }, { ssid: 'ChinaNet-5G', signal: 31, security: 'WPA2' }, { ssid: 'cafe', signal: 22, security: '' }])),
+  WifiAdd: (b, ssid, psk, hidden, phone) => {
+    if (mockState.wifi.some((p) => p.ssid === ssid)) return simulate('wifi', b, '', [['wifi', 'Change the saved Wi-Fi', [], 500, 'fail', `"${ssid}" is saved already; remove it first to change its password`]]);
+    return simulate('wifi', b, '', [['wifi', 'Save Wi-Fi ' + ssid, [`saved Wi-Fi "${ssid}"`], 700]], null, {
+      after: () => mockState.wifi.push({ uuid: 'u-' + nid(), id: ssid, ssid, mode: 'infrastructure', hidden: !!hidden, autoconnect: true, priority: 0, secure: !!psk, phone: !!phone }) });
+  },
+  WifiPhone: (b, uuid, phone) => simulate('wifi', b, '', [['wifi', 'Mark a saved Wi-Fi', [phone ? 'marked as a phone hotspot' : 'marked as an ordinary Wi-Fi'], 500]], null,
+    { after: () => { const p = mockState.wifi.find((x) => x.uuid === uuid); if (p) p.phone = phone; } }),
+  WifiRemove: (b, uuid) => simulate('wifi', b, '', [['wifi', 'Remove a saved Wi-Fi', ['removed'], 600]], null, { after: () => { mockState.wifi = mockState.wifi.filter((p) => p.uuid !== uuid); } }),
+  Away: (b, mode, ssid) => simulate('away', b, '', [...(ssid ? [['hotspot', `Save hotspot "${ssid}"`, [`hotspot "${ssid}" saved`], 500]] : []),
+    ['away', { off: 'Away from saved Wi-Fi: stay offline', board: "Away from saved Wi-Fi: open the board's own hotspot", phone: 'Away from saved Wi-Fi: join a phone hotspot', both: "Away from saved Wi-Fi: join a phone hotspot, else open the board's own" }[mode], [], 800]],
+    null, { after: () => { if (ssid) mockState.hotspot = { ssid }; mockState.away = mode; if (mode === 'off' || mode === 'phone') mockState.onHotspot = false; } }),
+  HotspotNow: (b, open) => simulate('hotspot', b, '', [['hotspot', open ? 'Open the hotspot now' : 'Close the hotspot and join a saved Wi-Fi', [`asked quay-hotspot to ${open ? 'open' : 'close'} the hotspot`], 600]], null,
+    { after: () => { mockState.onHotspot = open; } }),
+  SystemFix: (b, id) => simulate('sysfix', b, '', [['system', "Don't open it at boot", ['Duck-Setup-hotspot-1a2b3c4d: no longer comes up by itself'], 700]], null,
+    { after: () => { mockState.duckSetupHotspotOff = true; } }),
   RelaySettings: () => ({ upstream: mockState.relayUpstream, effective: mockState.relayUpstream || 'http://127.0.0.1:7890' }),
   SetRelayUpstream: (u) => { mockState.relayUpstream = u; return mock.RelaySettings(); },
   Scan: () => simulate('scan', '', '', [['scan', 'Look for boards', [], 1100]], () => [
@@ -326,7 +377,12 @@ const mock = {
     mock.Cancel = () => { alive = false; };
     return op;
   },
-  PolicyCatalog: () => simulate('policy-catalog', '', '', [[ 'index', 'Read the indexes', [], 600 ]], { entries: MOCK_POLICIES, problems: [], indexes: [duckProfile.policies.index.url, ...(mockState.policyIndexes || [])] }),
+  PolicyCatalog: () => simulate('policy-catalog', '', '', [[ 'index', 'Read the indexes', [], 600 ]], () => {
+    const indexes = [duckProfile.policies.index.url, ...(mockState.policyIndexes || [])];
+    const describe = (u) => { const m = u.match(/^https:\/\/(?:raw\.githubusercontent\.com|cdn\.jsdelivr\.net\/gh)\/([^/]+)\/([^/@]+)/);
+      return m ? { name: m[2], page: `https://github.com/${m[1]}/${m[2]}` } : /^https?:/.test(u) ? { name: new URL(u).host, page: u } : { name: u.split('/').pop() }; };
+    return { entries: MOCK_POLICIES, problems: [], indexes, sources: indexes.map((url) => ({ url, ...describe(url) })) };
+  }),
   Policies: (b, f) => simulate('policies', b, f, [], () => ({ app: 'xgoduck', folder: f, overlay: false, running: mockState.apps[0].status === 'running',
     slots: duckProfile.policies.slots.map((sl) => { const act = mockState.apps[0].policies[sl.id] || null; return { ...sl, active: act, sha256: act ? act.sha256 : 'stock-' + sl.id, changed: false }; }) })),
   CheckPolicy: (req) => simulate('policy-check', req.board, req.folder, req.entry ? [['download', 'Download ' + req.entry.name, [], 700]] : [], () => {

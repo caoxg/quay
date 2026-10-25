@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Stand-in for NetworkManager's nmcli on the fake board: the subset Quay's network scripts use.
+
+State lives in /var/lib/fake-nm/state.json: profiles (uuid -> settings), the active uuid, the SSIDs in
+range. Profiles come from keyfiles (`connection load`), like the real one; the seed has a home Wi-Fi.
+"""
+import json
+import os
+import sys
+
+STATE = "/var/lib/fake-nm/state.json"
+SEED = {
+    "ap": True,
+    "active": "11111111-1111-1111-1111-111111111111",
+    "in_range": {"home": 70, "Neighbor": 40},
+    "profiles": {
+        "11111111-1111-1111-1111-111111111111": {
+            "connection.id": "Duck-Setup-home", "connection.type": "802-11-wireless", "connection.autoconnect": "yes",
+            "connection.autoconnect-priority": "0", "802-11-wireless.ssid": "home", "802-11-wireless.mode": "infrastructure",
+            "802-11-wireless.hidden": "no", "802-11-wireless-security.key-mgmt": "wpa-psk", "file": ""},
+    },
+}
+
+
+def load():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except OSError:
+        return json.loads(json.dumps(SEED))
+
+
+def save(st):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    with open(STATE, "w") as f:
+        json.dump(st, f)
+    os.chmod(STATE, 0o666)
+
+
+def esc(v):
+    return v.replace("\\", "\\\\").replace(":", "\\:")
+
+
+def die(msg, code=10):
+    print("Error: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def keyfile(path):
+    sec, res = "", {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("["):
+                sec = line.strip("[]")
+            elif "=" in line:
+                k, _, v = line.partition("=")
+                res[(sec, k)] = v.replace("\\s", " ").replace("\\\\", "\\")
+    names = {"wifi": "802-11-wireless", "wifi-security": "802-11-wireless-security"}
+    p = {"file": path}
+    for (sec, k), v in res.items():
+        if sec == "connection" and k == "type":
+            v = "802-11-wireless" if v == "wifi" else v
+        if k in ("autoconnect", "hidden"):
+            v = "yes" if v == "true" else "no"
+        p["%s.%s" % (names.get(sec, sec), k)] = v
+    p.setdefault("connection.autoconnect", "yes")
+    p.setdefault("connection.autoconnect-priority", "0")
+    p.setdefault("802-11-wireless.mode", "infrastructure")
+    p.setdefault("802-11-wireless.hidden", "no")
+    return p["connection.uuid"], p
+
+
+def find(st, how, key):
+    for u, p in st["profiles"].items():
+        if (how == "uuid" and u == key) or (how == "id" and p.get("connection.id") == key):
+            return u, p
+    die("unknown connection '%s'." % key)
+
+
+def device_fields(st):
+    a = st["active"]
+    p = st["profiles"].get(a, {})
+    return {"GENERAL.STATE": "100 (connected)" if a else "30 (disconnected)", "GENERAL.CON-UUID": a or "--",
+            "GENERAL.CONNECTION": p.get("connection.id", "--") if a else "--",
+            "WIFI-PROPERTIES.AP": "yes" if st["ap"] else "no",
+            "IP4.ADDRESS[1]": ("10.42.0.1/24" if p.get("802-11-wireless.mode") == "ap" else "192.168.2.163/24") if a else ""}
+
+
+def show(fields, values, terse, get):
+    for f in fields:
+        v = values.get(f, "")
+        if get:
+            print(esc(v) if len(fields) > 1 else v)
+        else:
+            print("%s:%s" % (f, esc(v)) if terse else "%-30s %s" % (f + ":", v))
+
+
+def main(argv):
+    terse = get = False
+    fields = None
+    args = list(argv)
+    while args and args[0].startswith("-"):
+        a = args.pop(0)
+        if a == "--version":
+            print("nmcli tool, version 1.52.1 (fake)")
+            return
+        if a == "-t":
+            terse = True
+        elif a in ("-f", "-g"):
+            fields = args.pop(0).split(",")
+            get = get or a == "-g"
+            terse = True
+        elif a == "--wait":
+            args.pop(0)
+    st = load()
+    cmd = " ".join(args[:2])
+    if cmd == "device show":
+        show(fields, device_fields(st), terse, get)
+    elif cmd == "device wifi":
+        for ssid, sig in sorted(st["in_range"].items()) if not st["profiles"].get(st["active"], {}).get("802-11-wireless.mode") == "ap" else []:
+            print(":".join(esc(x) for x in [ssid, str(sig), "WPA2"][: len(fields)]) if fields != ["SSID"] else esc(ssid))
+    elif cmd == "connection show" and len(args) == 2:
+        for u, p in st["profiles"].items():
+            row = {"UUID": u, "TYPE": p.get("connection.type", ""), "NAME": p.get("connection.id", "")}
+            print(":".join(esc(row[f]) for f in fields))
+    elif cmd == "connection show":
+        u, p = find(st, args[2], args[3])
+        show(fields, dict(p, **{"connection.uuid": u}), terse, get)
+    elif cmd == "connection load":
+        u, p = keyfile(args[2])
+        st["profiles"][u] = p
+        save(st)
+    elif cmd == "connection delete":
+        u, p = find(st, args[2], args[3])
+        if p.get("file"):
+            os.remove(p["file"])
+        del st["profiles"][u]
+        if st["active"] == u:
+            st["active"] = ""
+        save(st)
+        print("Connection '%s' (%s) successfully deleted." % (p.get("connection.id"), u))
+    elif cmd == "connection up":
+        u, p = find(st, args[2], args[3])
+        if p.get("802-11-wireless.mode") != "ap" and p.get("802-11-wireless.ssid") not in st["in_range"]:
+            die("Connection activation failed: no network with SSID '%s' found." % p.get("802-11-wireless.ssid"), 4)
+        st["active"] = u
+        save(st)
+    elif cmd == "connection modify":
+        u, p = find(st, args[2], args[3])
+        rest = args[4:]
+        for k, v in zip(rest[::2], rest[1::2]):
+            p[k] = v
+        save(st)
+    elif cmd == "connection down":
+        u, _ = find(st, args[2], args[3])
+        if st["active"] == u:
+            st["active"] = ""
+            save(st)
+    else:
+        die("fake nmcli does not know: " + " ".join(argv), 2)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

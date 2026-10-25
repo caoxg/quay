@@ -1,0 +1,13 @@
+# Installed by Quay ("quay hotspot off" removes it).
+[Unit]
+Description=Open a Wi-Fi hotspot when there is no Wi-Fi (Quay)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+ExecStart=/usr/local/lib/quay/quay-hotspot run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

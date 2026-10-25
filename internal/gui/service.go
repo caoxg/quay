@@ -22,6 +22,7 @@ import (
 	"github.com/caoxg/quay/internal/config"
 	"github.com/caoxg/quay/internal/core"
 	"github.com/caoxg/quay/internal/discover"
+	"github.com/caoxg/quay/internal/hub"
 	"github.com/caoxg/quay/internal/legal"
 	"github.com/caoxg/quay/internal/mirror"
 	"github.com/caoxg/quay/internal/profile"
@@ -71,6 +72,12 @@ type Prompt struct {
 }
 
 func newService() *Service {
+	hub.Default = &hub.Loader{Dir: config.ProfileCacheDir()}
+	go func() { // a newer copy of the profiles repository, for the boards opened after this
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = hub.Default.Refresh(ctx)
+	}()
 	return &Service{
 		sessions: map[string]*core.Session{},
 		cache:    map[string]cached{},
@@ -768,6 +775,75 @@ func (s *Service) Relay(boardName string, on bool, upstream string) string {
 			sess.StopRelay()
 		}
 		return nil, nil
+	})
+}
+
+// Network reads the board's Wi-Fi: saved networks and the automatic hotspot.
+func (s *Service) Network(boardName string) string {
+	return s.run("network", boardName, "", func(ctx context.Context, sess *core.Session, _ core.Sink) (any, error) {
+		return sess.Network(ctx)
+	})
+}
+
+// WifiScan lists the Wi-Fi networks in range of the board.
+func (s *Service) WifiScan(boardName string) string {
+	return s.run("wifiscan", boardName, "", func(ctx context.Context, sess *core.Session, _ core.Sink) (any, error) {
+		return sess.WifiScan(ctx)
+	})
+}
+
+// WifiAdd saves a Wi-Fi network on the board (psk "" for an open network; phone for a phone hotspot).
+func (s *Service) WifiAdd(boardName, ssid, psk string, hidden, phone bool) string {
+	return s.run("wifi", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.WifiAdd(ctx, sink, ssid, psk, hidden, phone)
+	})
+}
+
+// WifiPhone marks a saved network as a phone hotspot or as an ordinary one.
+func (s *Service) WifiPhone(boardName, uuid string, phone bool) string {
+	return s.run("wifi", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.WifiPhone(ctx, sink, uuid, phone)
+	})
+}
+
+// WifiRemove deletes a saved Wi-Fi network by its profile uuid.
+func (s *Service) WifiRemove(boardName, uuid string) string {
+	return s.run("wifi", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.WifiRemove(ctx, sink, uuid)
+	})
+}
+
+// Away sets the away plan (off, own, phone, both), saving the board's own hotspot first when ssid
+// is given (psk "" keeps its password). Leaving the board's own hotspot out of the plan while it is
+// open ends this connection a few seconds later.
+func (s *Service) Away(boardName, mode, ssid, psk string) string {
+	return s.run("away", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		if err := sess.Away(ctx, sink, mode, ssid, psk); err != nil {
+			return nil, err
+		}
+		if mode == core.AwayOff || mode == core.AwayPhone {
+			s.dropSession(boardName) // the board may change networks: reconnect next time
+		}
+		return nil, nil
+	})
+}
+
+// HotspotNow opens the hotspot now (open) or closes it and joins a saved Wi-Fi. The board changes
+// networks a few seconds later, so the session is dropped; the next operation reconnects.
+func (s *Service) HotspotNow(boardName string, open bool) string {
+	return s.run("hotspot", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		if err := sess.HotspotNow(ctx, sink, open); err != nil {
+			return nil, err
+		}
+		s.dropSession(boardName)
+		return nil, nil
+	})
+}
+
+// SystemFix applies a system profile finding's built-in action (see core.SystemFix).
+func (s *Service) SystemFix(boardName, id string) string {
+	return s.run("sysfix", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.SystemFix(ctx, sink, id)
 	})
 }
 

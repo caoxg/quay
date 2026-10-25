@@ -244,6 +244,32 @@ func (s *Store) open(ctx context.Context, u string) (*http.Response, error) {
 }
 
 // localPath accepts file:// URLs and plain paths.
+// Describe names an index for people: the repository for an index kept on GitHub (read directly or
+// through jsDelivr), with its page; otherwise the file name or the host. page is empty for a local file.
+func Describe(u string) (name, page string) {
+	if p, ok := localPath(u); ok {
+		return filepath.Base(p), ""
+	}
+	pu, err := url.Parse(u)
+	if err != nil {
+		return u, ""
+	}
+	parts := strings.Split(strings.Trim(pu.Path, "/"), "/")
+	repo := func(owner, name string) (string, string) {
+		name, _, _ = strings.Cut(name, "@")
+		return name, "https://github.com/" + owner + "/" + name
+	}
+	switch {
+	case pu.Host == "raw.githubusercontent.com" && len(parts) >= 2:
+		return repo(parts[0], parts[1])
+	case pu.Host == "cdn.jsdelivr.net" && len(parts) >= 3 && parts[0] == "gh":
+		return repo(parts[1], parts[2])
+	case pu.Host == "github.com" && len(parts) >= 2:
+		return repo(parts[0], parts[1])
+	}
+	return pu.Host, u
+}
+
 func localPath(u string) (string, bool) {
 	if strings.HasPrefix(u, "file://") {
 		p, err := url.Parse(u)

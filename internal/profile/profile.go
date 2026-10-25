@@ -5,16 +5,18 @@
 package profile
 
 import (
-	"embed"
 	"errors"
 	"fmt"
-	"io/fs"
 	"path"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/caoxg/quay/internal/hub"
 )
 
 // FileName is looked up at the app root.
@@ -25,6 +27,8 @@ type Profile struct {
 	ID          string `yaml:"id" json:"id"`
 	Name        string `yaml:"name" json:"name"`
 	Description string `yaml:"description" json:"description,omitempty"`
+	// Icon replaces the app.yaml icon in Quay: an emoji, or inline SVG markup (<svg …>…</svg>).
+	Icon string `yaml:"icon" json:"icon,omitempty"`
 	// Folder is the default install folder under ~/ArduinoApps.
 	Folder string `yaml:"folder" json:"folder,omitempty"`
 	// Source offers the app in the GUI's catalog (repo URL and optional ref/subdir).
@@ -237,6 +241,9 @@ func Parse(b []byte) (*Profile, error) {
 			return nil, fmt.Errorf("%s: each action needs a label and a url (a path like /settings, or http(s)://…)", FileName)
 		}
 	}
+	if err := checkIcon(p.Icon); err != nil {
+		return nil, fmt.Errorf("%s: %w", FileName, err)
+	}
 	if p.Policies != nil {
 		if err := p.Policies.validate(); err != nil {
 			return nil, fmt.Errorf("%s: %w", FileName, err)
@@ -248,26 +255,54 @@ func Parse(b []byte) (*Profile, error) {
 	return &p, nil
 }
 
-//go:embed profiles/*.yaml
-var builtinFS embed.FS
+// MaxIconSVG bounds an inline SVG icon; an icon needs a few KB.
+const MaxIconSVG = 16 << 10
 
-// Builtins returns the embedded profiles, sorted by name.
+func checkIcon(icon string) error {
+	icon = strings.TrimSpace(icon)
+	switch {
+	case strings.HasPrefix(icon, "<svg"):
+		if len(icon) > MaxIconSVG || !strings.HasSuffix(icon, "</svg>") {
+			return fmt.Errorf("icon: an SVG icon is one <svg>…</svg> element of at most %d KB", MaxIconSVG>>10)
+		}
+	case strings.ContainsAny(icon, "<>") || utf8.RuneCountInString(icon) > 8:
+		return errors.New("icon: use an emoji or inline <svg> markup")
+	}
+	return nil
+}
+
+var (
+	builtinMu   sync.Mutex
+	builtinFrom *hub.Snapshot
+	builtinList []*Profile
+)
+
+// Builtins returns the app profiles from the profiles repository (hub: the newest copy Quay has,
+// built in or fetched), sorted by name. A file that does not read is replaced by the built-in copy
+// of the same file, if any.
 func Builtins() []*Profile {
+	snap := hub.Get()
+	builtinMu.Lock()
+	defer builtinMu.Unlock()
+	if snap == builtinFrom {
+		return builtinList
+	}
 	var out []*Profile
-	entries, _ := fs.ReadDir(builtinFS, "profiles")
-	for _, e := range entries {
-		b, err := builtinFS.ReadFile(path.Join("profiles", e.Name()))
+	for _, f := range snap.Each(snap.Index.Apps) {
+		p, err := Parse(f.Data)
+		if err != nil && snap.Source != "built in" {
+			if b, ok := hub.Builtin().Files[f.Name]; ok {
+				p, err = Parse(b)
+			}
+		}
 		if err != nil {
 			continue
-		}
-		p, err := Parse(b)
-		if err != nil {
-			panic("built-in profile " + e.Name() + ": " + err.Error())
 		}
 		p.Origin = "builtin"
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	builtinFrom, builtinList = snap, out
 	return out
 }
 

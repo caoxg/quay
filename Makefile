@@ -8,6 +8,7 @@
 #   make release    all of the above + CLI binaries for every platform + SHA256SUMS
 #   make licenses   regenerate internal/legal/THIRD_PARTY_LICENSES.txt after changing dependencies
 #   make test       unit tests          make e2e   end-to-end tests on a Docker fake board
+#   make profiles   take ../quay-profiles as the built-in copy of the profiles repository
 #   make preview    the UI with a mock backend at http://127.0.0.1:8765/?mock (&os=windows|linux)
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -49,7 +50,7 @@ define bundle
 	codesign --force --deep --sign - dist/Quay.app
 endef
 
-.PHONY: build cli app mac windows linux clis checksums licenses release test e2e preview screenshots clean
+.PHONY: build cli app mac windows linux clis checksums licenses release profiles test e2e preview screenshots clean
 
 build:
 	GOARCH=$(GOARCH) CGO_ENABLED=1 go build -tags "$(GUI_TAGS)" -trimpath -ldflags "$(LDFLAGS)" -o $(EXE) .
@@ -121,6 +122,14 @@ release: clean licenses windows linux clis checksums
 endif
 	rm -rf $(STAGE)
 	@ls -1 dist
+
+# Take the profiles repository (PROFILES, default ../quay-profiles) as Quay's built-in copy.
+PROFILES ?= ../quay-profiles
+profiles:
+	@test -f $(PROFILES)/index.yaml || { echo "no $(PROFILES)/index.yaml (PROFILES=dir)"; exit 1; }
+	rm -rf internal/hub/builtin && mkdir -p internal/hub/builtin
+	cp -R $(PROFILES)/index.yaml $(PROFILES)/apps $(PROFILES)/systems internal/hub/builtin/
+	go test ./internal/hub ./internal/profile ./internal/sysprofile
 
 test:
 	go vet $(TEST_TAGS) ./...

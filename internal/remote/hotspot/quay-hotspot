@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""quay-hotspot: the board opens its own Wi-Fi hotspot when no Wi-Fi it knows is in range, and goes
+back to Wi-Fi when one is in range again.
+
+Installed by Quay (`quay hotspot on`; `quay hotspot off` removes it); see README.md next to this
+file for installing it by hand. It owns one NetworkManager profile, "quay-hotspot", and leaves the
+others alone:
+
+- No Wi-Fi BOOT_WAIT s after the Wi-Fi device comes up, or LOST_WAIT s after losing Wi-Fi: open
+  the hotspot.
+- Nobody on the hotspot for IDLE s: every RETRY s, close it, look for a saved Wi-Fi (home, a
+  phone's hotspot, ...) and join it; none in range: open the hotspot again.
+- Another hotspot is up (e.g. one set up by Duck Setup): do nothing.
+
+    quay-hotspot run      the service (systemd: quay-hotspot.service)
+    quay-hotspot open     ask the service to open the hotspot now
+    quay-hotspot close    ask it to close the hotspot now and look for Wi-Fi
+    quay-hotspot status   print the service's state (JSON)
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+
+CON = "quay-hotspot"  # the NetworkManager profile this service opens and closes
+IFACE = os.environ.get("QUAY_HOTSPOT_IFACE", "wlan0")
+RUN = "/run/quay-hotspot"  # state.json (read by Quay) and request (open/close)
+
+BOOT_WAIT = 45  # s after the Wi-Fi device comes up to wait for Wi-Fi before opening the hotspot
+LOST_WAIT = 60  # s without Wi-Fi, after having had it, before opening the hotspot
+IDLE = 180  # s with nobody on the hotspot before looking for Wi-Fi
+RETRY = 300  # s between looks while nobody is on the hotspot
+JOIN = 30  # s NetworkManager may take to join a Wi-Fi
+TICK = 5
+
+CONNECTED = 100  # NetworkManager device states
+DISCONNECTED = 30
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def unescape(s):
+    """nmcli -t escapes ':' and '\\' in values."""
+    out, esc = [], False
+    for ch in s:
+        if esc:
+            out.append(ch)
+            esc = False
+        elif ch == "\\":
+            esc = True
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def split_terse(line):
+    """Splits an nmcli -t line at unescaped ':' and unescapes the fields."""
+    fields, cur, esc = [], [], False
+    for ch in line:
+        if esc:
+            cur.append(ch)
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == ":":
+            fields.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    fields.append("".join(cur))
+    return fields
+
+
+class NM:
+    """The few NetworkManager and wpa_supplicant calls the service makes."""
+
+    def run(self, *args, timeout=60):
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+            return r.returncode, r.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return 1, ""
+
+    def values(self, *args):
+        """key:value lines of an nmcli -t ... show command, as a dict."""
+        _, out = self.run("nmcli", "-t", *args)
+        res = {}
+        for line in out.splitlines():
+            k, _, v = line.partition(":")
+            res[k] = unescape(v)
+        return res
+
+    def device(self):
+        """(state, uuid of the active connection) of the Wi-Fi device."""
+        v = self.values("-f", "GENERAL.STATE,GENERAL.CON-UUID", "device", "show", IFACE)
+        state = v.get("GENERAL.STATE", "").split(" ")[0]
+        uuid = v.get("GENERAL.CON-UUID", "")
+        return int(state) if state.isdigit() else 0, "" if uuid == "--" else uuid
+
+    def profiles(self):
+        """Saved Wi-Fi profiles: dicts with uuid, id, ssid, mode, hidden, autoconnect, priority."""
+        _, out = self.run("nmcli", "-t", "-f", "UUID,TYPE", "connection", "show")
+        res = []
+        for line in out.splitlines():
+            f = split_terse(line)
+            if len(f) < 2 or f[1] not in ("802-11-wireless", "wifi"):
+                continue
+            v = self.values("-f", "connection.id,802-11-wireless.ssid,802-11-wireless.mode,802-11-wireless.hidden,"
+                            "connection.autoconnect,connection.autoconnect-priority", "connection", "show", "uuid", f[0])
+            prio = v.get("connection.autoconnect-priority", "0")
+            res.append({"uuid": f[0], "id": v.get("connection.id", ""), "ssid": v.get("802-11-wireless.ssid", ""),
+                        "mode": v.get("802-11-wireless.mode", "") or "infrastructure",
+                        "hidden": v.get("802-11-wireless.hidden") == "yes",
+                        "autoconnect": v.get("connection.autoconnect") == "yes",
+                        "priority": int(prio) if prio.lstrip("-").isdigit() else 0})
+        return res
+
+    def visible(self):
+        """The SSIDs in range (rescans first)."""
+        _, out = self.run("nmcli", "-t", "-f", "SSID", "device", "wifi", "list", "ifname", IFACE, "--rescan", "yes", timeout=45)
+        return {unescape(line) for line in out.splitlines() if line}
+
+    def up(self, uuid, wait=JOIN):
+        rc, _ = self.run("nmcli", "--wait", str(wait), "connection", "up", "uuid", uuid, timeout=wait + 15)
+        return rc == 0
+
+    def down(self, uuid):
+        self.run("nmcli", "connection", "down", "uuid", uuid)
+
+    def stations(self):
+        """How many devices are on the hotspot; None when that cannot be told."""
+        bus = ("busctl", "--json=short")
+        _, out = self.run(*bus, "call", "fi.w1.wpa_supplicant1", "/fi/w1/wpa_supplicant1", "fi.w1.wpa_supplicant1",
+                          "GetInterface", "s", IFACE)
+        try:
+            path = json.loads(out)["data"][0]
+            _, out = self.run(*bus, "get-property", "fi.w1.wpa_supplicant1", path, "fi.w1.wpa_supplicant1.Interface", "Stations")
+            return len(json.loads(out)["data"])
+        except (ValueError, KeyError, IndexError, TypeError):
+            pass
+        # Older wpa_supplicant: devices that talked to the board recently.
+        _, out = self.run("ip", "-j", "neigh", "show", "dev", IFACE)
+        try:
+            return sum(1 for n in json.loads(out) if set(n.get("state", [])) & {"REACHABLE", "DELAY", "PROBE"})
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+
+class Service:
+    def __init__(self, nm, clock=time.monotonic, sleep=time.sleep, run_dir=RUN):
+        self.nm, self.clock, self.sleep, self.run_dir = nm, clock, sleep, run_dir
+        self.available = False  # the Wi-Fi device is up (not unavailable, radio on)
+        self.had_wifi = False
+        self.since = clock()  # when the wait for Wi-Fi started, or the last time there was Wi-Fi
+        self.idle_since = None  # since when nobody has been on the hotspot
+        self.last_look = None
+        self.modes = {}  # uuid -> 802-11-wireless.mode
+        self.ours_uuid, self.ours_at = "", None
+        self.reported = None
+
+    # -- requests and state, through files in run_dir
+
+    def request(self):
+        p = os.path.join(self.run_dir, "request")
+        try:
+            with open(p) as f:
+                r = f.read().strip()
+            os.remove(p)
+            return r
+        except OSError:
+            return ""
+
+    def report(self, state, stations=None):
+        cur = (state, stations)
+        if cur == self.reported:
+            return
+        self.reported = cur
+        try:
+            tmp = os.path.join(self.run_dir, "state.json.tmp")
+            with open(tmp, "w") as f:
+                json.dump({"state": state, "stations": stations, "since": int(time.time())}, f)
+            os.replace(tmp, os.path.join(self.run_dir, "state.json"))
+        except OSError:
+            pass
+
+    # -- NetworkManager
+
+    def mode(self, uuid):
+        if uuid not in self.modes:
+            v = self.nm.values("-f", "802-11-wireless.mode", "connection", "show", "uuid", uuid)
+            self.modes[uuid] = v.get("802-11-wireless.mode", "")
+        return self.modes[uuid]
+
+    def ours(self):
+        """The hotspot profile's uuid (looked up again every minute)."""
+        if self.ours_at is None or self.clock() - self.ours_at >= 60:
+            self.ours_uuid = self.nm.values("-f", "connection.uuid", "connection", "show", "id", CON).get("connection.uuid", "")
+            self.ours_at = self.clock()
+        return self.ours_uuid
+
+    def open(self, why):
+        ours = self.ours()
+        if not ours:
+            log(why + ": cannot open the hotspot, its profile %r is missing" % CON)
+        else:
+            log(why + ": opening the hotspot")
+            if not self.nm.up(ours):
+                log("the hotspot did not open")
+        self.since = self.clock()  # if it failed, try again after LOST_WAIT, not every tick
+        self.idle_since = self.last_look = self.clock()
+
+    def look(self, ours, asked=False):
+        """Closes the hotspot, joins a saved Wi-Fi in range or opens the hotspot again."""
+        self.last_look = self.clock()
+        known = [p for p in self.nm.profiles()
+                 if p["uuid"] != ours and p["id"] != CON and p["mode"] == "infrastructure" and p["autoconnect"]]
+        if not known and not asked:
+            return
+        log(("asked to close the hotspot" if asked else "nobody on the hotspot") + ": looking for Wi-Fi")
+        self.nm.down(ours)
+        self.sleep(2)
+        seen = self.nm.visible()
+        for p in sorted((p for p in known if p["ssid"] in seen or p["hidden"]), key=lambda p: -p["priority"]):
+            state, uuid = self.nm.device()
+            if state == CONNECTED and uuid and uuid != ours:
+                break  # NetworkManager joined one by itself
+            log("joining " + p["ssid"])
+            if self.nm.up(p["uuid"]):
+                break
+        state, uuid = self.nm.device()
+        if state == CONNECTED and uuid and uuid != ours:
+            log("on Wi-Fi again")
+            self.had_wifi, self.since, self.idle_since = True, self.clock(), None
+            self.report("wifi")
+            return
+        log("no saved Wi-Fi in range: opening the hotspot again")
+        self.nm.up(ours)
+        self.idle_since = self.clock()
+
+    def tick(self):
+        now = self.clock()
+        req = self.request()
+        state, uuid = self.nm.device()
+        if state < DISCONNECTED:  # unmanaged, or unavailable (e.g. radio off)
+            self.available = False
+            self.report("off")
+            return
+        if not self.available:  # the wait for Wi-Fi starts when the device comes up
+            self.available, self.since = True, now
+        ours = self.ours()
+        if uuid and uuid == ours:
+            if req == "close":
+                self.look(ours, asked=True)
+                return
+            n = self.nm.stations()
+            self.report("hotspot", n)
+            if n is None or n > 0:
+                self.idle_since = None
+                return
+            if self.idle_since is None:
+                self.idle_since = now
+            if now - self.idle_since >= IDLE and (self.last_look is None or now - self.last_look >= RETRY):
+                self.look(ours)
+            return
+        if uuid and self.mode(uuid) == "ap":  # someone else's hotspot
+            self.since = now
+            self.report("other-hotspot")
+            return
+        if state == CONNECTED and uuid:
+            self.had_wifi, self.since = True, now
+            self.report("wifi")
+            if req == "open":
+                self.open("asked")
+            return
+        if req == "open":
+            self.open("asked")
+        elif now - self.since >= (LOST_WAIT if self.had_wifi else BOOT_WAIT):
+            self.open("no Wi-Fi")
+        else:
+            self.report("waiting")
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "run"
+    if cmd == "run":
+        os.makedirs(RUN, exist_ok=True)
+        os.chmod(RUN, 0o755)
+        log("watching %s: hotspot when there is no Wi-Fi" % IFACE)
+        s = Service(NM())
+        while True:
+            try:
+                s.tick()
+            except Exception as e:  # keep running; systemd would restart us anyway
+                log("error: %s" % e)
+            time.sleep(TICK)
+    if cmd in ("open", "close"):
+        os.makedirs(RUN, exist_ok=True)
+        with open(os.path.join(RUN, "request"), "w") as f:
+            f.write(cmd)
+        print("asked quay-hotspot to %s the hotspot" % cmd)
+        return 0
+    if cmd == "status":
+        try:
+            with open(os.path.join(RUN, "state.json")) as f:
+                print(f.read())
+        except OSError:
+            print("{}")
+        return 0
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

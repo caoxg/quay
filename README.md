@@ -67,6 +67,7 @@ It is what you would otherwise do by hand over SSH, and an alternative to re-fla
 - **Finds your boards.** Boards on the local network show up by themselves (they announce `_arduino._tcp` over mDNS). A board's name in Quay is its own hostname — the name App Lab shows and `NAME.local` — and renaming it in Quay renames the board.
 - **System updates without App Lab.** Quay lists what the board's update would download (on a fresh board, hundreds of MB) and runs the board's own `arduino-app-cli system update`, or leaves out the on-board desktop packages (App Lab, Chromium) a board used from a computer does not need. The update runs detached on the board, so a dropped Wi‑Fi link does not interrupt it.
 - **Faster downloads where the board is slow.** `quay mirror cn` tests eight mirrors in mainland China from the board itself and points pip, uv and apt's Debian packages at the fastest; apt also gets the next fastest and the official servers to fall back to by itself if a mirror breaks. `quay relay on` lets the board download through your computer (and its proxy) while Quay is connected. Both are separate, reversible commands, never applied implicitly.
+- **Reachable away from home.** Save a phone's hotspot next to the board's everyday Wi‑Fi, and choose what the board does when that Wi‑Fi is out of range: open a hotspot of its own (a phone then reaches the app at `http://10.42.0.1`), join the phone's hotspot, try the phone first and fall back to its own hotspot, or stay offline. It goes back to its Wi‑Fi by itself. See [Wi‑Fi and the away plan](#wifi-and-the-away-plan).
 - **SSH or USB.** Wi‑Fi/Ethernet over SSH (agent, key files, or password), or USB through `adb`.
 - **Native and small.** The app uses the system web view (WebKit on macOS and Linux, WebView2 on Windows) through [Wails v3](https://v3.wails.io); there is no bundled Chromium. One binary is both the app and the CLI.
 
@@ -98,6 +99,7 @@ Run Quay without arguments, or open it from the dock, Start menu or application 
 2. **Install an app.** Choose from **Custom** (apps that come with a Quay profile), paste a git URL (`owner/repo` works for GitHub), or pick a local folder. Quay shows what it found — app name, ref, commit, profile — before anything touches the board.
 3. **Run it.** Each app card shows its state, where it came from, its data files and whether it runs at boot. **Console** opens the app's own web UI. The ⋯ menu has update, logs, backup, restore, export, system setup and erase.
 4. **Keep the board current.** The **System** card shows the pending system updates; click it to see what they are, choose everything or Arduino's packages only, and install. The board menu (⋯ at the top) also renames the board.
+5. **Take it out.** The **Network** card opens the board's Wi‑Fi: everyday networks, phone hotspots, and what the board does away from its Wi‑Fi (see [Wi‑Fi and the away plan](#wifi-and-the-away-plan)).
 
 Long operations run in the **Activity** panel with their steps and logs. You can keep working while they run.
 
@@ -116,9 +118,11 @@ Apps         status · deploy REPO|DIR · update APP · start|stop|restart APP �
              open APP · backup APP · restore APP FILE · export APP · erase APP
 Board        upgrade [--check] [--arduino-only] [--skip-desktop] · rename NAME · prepare APP [--revert]
              mirror cn|off|test|list · relay on|off
+Network      wifi [ls|scan] · wifi add NAME [--phone] [--hidden] [--open] · wifi set NAME --phone[=false] · wifi rm NAME
+             hotspot [board|phone|both|off] [--name NAME] [--new-password] · hotspot open|close
 Policies     policy list APP · policy search [PROFILE] · policy install APP ID|FILE.onnx [--slot S] · policy restore APP [SLOT…]
              policy inspect FILE.onnx [--app PROFILE] · policy index [add|rm URL]
-Other        refs REPO · shell · profiles · licenses · gui
+Other        refs REPO · shell · system [fix ID] · profiles [--refresh] · licenses · gui
 Global       -b/--board NAME · -H/--host ADDRESS · --json
 ```
 
@@ -160,6 +164,10 @@ quay upgrade --skip-desktop
 
 # Rename the board (it becomes goose.local; App Lab shows the new name too)
 quay rename goose
+
+# Away from home: save the phone's hotspot; the board joins it, else opens a hotspot of its own
+quay wifi add "Wei's iPhone" --phone
+quay hotspot both
 ```
 
 `--json` turns any command's progress into one JSON event per line, for scripts and other front ends.
@@ -183,6 +191,23 @@ quay rename goose
 - `quay upgrade` runs the board's system update. It refreshes the package lists, shows what would be installed and how much it downloads, asks, then runs `arduino-app-cli system update` — the update App Lab runs. `--arduino-only` limits it to Arduino's packages; `--skip-desktop` leaves out the on-board App Lab and Chromium (about 290 MB on a fresh board). The board image lets these commands run without a password. The job runs detached on the board: if the connection drops, run `quay upgrade` again to follow it.
 - `quay upload-key` appends your SSH public key (`~/.ssh/id_ed25519.pub`, `id_ecdsa.pub` or `id_rsa.pub`) to the board's `~/.ssh/authorized_keys`, like `ssh-copy-id`, so Quay and `ssh` log in without a password. `board add --upload-key` (a checkbox in the app's **Add board**) does it right away; the board menu has it too.
 - `quay rename NAME` renames the board the way App Lab does (`arduino-app-cli system set-name`), re-announces it as `NAME.local`, and updates the saved board.
+
+### Wi‑Fi and the away plan
+
+The board joins its **everyday Wi‑Fi** (home, office, classroom) whenever one is in range. `quay wifi` lists the saved networks, `quay wifi scan` the ones in range, `quay wifi add NAME` saves one (it asks for the password), `quay wifi rm NAME` forgets one. Adding a network never changes the current connection.
+
+A network saved with `--phone` is a **phone hotspot**: the board joins it only as the **away plan** says, and after any everyday Wi‑Fi. `quay wifi set NAME --phone` (or `--phone=false`) changes an existing network. The away plan is what the board does when none of its everyday Wi‑Fi is in range:
+
+| `quay hotspot …` | Away from its everyday Wi‑Fi, the board… |
+|---|---|
+| `off` | stays offline; phone hotspots are not joined either |
+| `board` | opens a hotspot of its own. Join it from a phone and open `http://10.42.0.1` (and the app's port, e.g. `http://10.42.0.1:9527`). Phone hotspots are not joined. |
+| `phone` | joins a saved phone hotspot while the phone has it on. The phone keeps its internet; the board's address is among the hotspot's connected devices. |
+| `both` | joins a phone hotspot if one is on, otherwise opens its own hotspot |
+
+`board` and `both` install a small service on the board, [`quay-hotspot`](internal/remote/hotspot/README.md) (sudo); the first time, Quay asks for the hotspot's password, and names the hotspot after the board unless you pass `--name`. The service opens the hotspot 45 seconds after boot without Wi‑Fi, or a minute after losing it. While nobody is on the hotspot, it looks for Wi‑Fi every 5 minutes and goes back to it; it never closes the hotspot under a connected phone. `quay hotspot open` opens it now, to try it (the board leaves its Wi‑Fi, so this connection drops; with nobody on it, the board returns within about 5 minutes); `quay hotspot close` goes back to Wi‑Fi now. `off` and `phone` remove the service and keep the hotspot's name and password for later. A hotspot set up by Duck Setup is left alone.
+
+In the app, the **Network** card opens all of this in one dialog.
 
 ### Policies
 
@@ -220,7 +245,13 @@ safety: { url: http://127.0.0.1:9527/api/status, field: enabled, message: Turn t
 web: { port: 9527 }
 ```
 
-The full reference is in [docs/quay-yaml.md](docs/quay-yaml.md). Quay also carries built-in profiles for known apps that do not ship a `quay.yaml` yet (`quay profiles` lists them). Currently there is one, for [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino). It was written for Quay and only drives scripts that already live in that repository; it is not maintained by Luwu Dynamics. A `quay.yaml` in the repository always wins over a built-in profile.
+The full reference is in [docs/quay-yaml.md](docs/quay-yaml.md). For known apps that do not ship a `quay.yaml` yet, Quay has profiles of its own (`quay profiles` lists them). They are published in [quay-profiles](https://github.com/caoxg/quay-profiles), separately from Quay: Quay carries a copy and fetches a newer one about twice a day, so a profile can be fixed without a Quay release. Currently there is one, for [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino). It was written for Quay and only drives scripts that already live in that repository; it is not maintained by Luwu Dynamics. A `quay.yaml` in the repository always wins.
+
+### Board systems
+
+The same repository has **system profiles** for board systems other than the stock Arduino image, such as Duck OS. A system profile recognises the system by a file it ships (Duck OS: `/etc/duck-release.json`), and lists what the system does differently that matters to Quay — for Duck OS, the Duck Setup hotspot that comes up at every boot and would override Quay's away plan. The **System** card then shows the system and version, and each finding appears where it matters, with a button for its fix. `quay system` shows the same, and `quay system fix ID` applies a fix.
+
+A profile fetched from the network only describes: files to look for (and which JSON keys to read, nothing else), saved network profiles to match, and which of Quay's built-in actions applies (stop a NetworkManager profile coming up by itself; delete one that is not in use). It cannot make Quay run a command of its own, and every fix waits for your click.
 
 ## Files and settings
 
@@ -231,7 +262,10 @@ The full reference is in [docs/quay-yaml.md](docs/quay-yaml.md). Quay also carri
 | Backups | `backups/` in the same folder, unless you choose another |
 | Repository cache | `Quay/repos` in the user cache folder |
 | Policy downloads and index copies | `Quay/policies` in the user cache folder |
+| The newest copy of the profiles repository | `Quay/profiles` in the user cache folder |
 | Installed policies (on the board) | `~/ArduinoApps/APP/data/quay-policies/` (models, stock originals, `state.json`) |
+| Away plan and phone hotspots (on the board) | `/etc/quay/network.json`; networks Quay saves are NetworkManager keyfiles `quay-wifi-*.nmconnection` and `quay-hotspot.nmconnection` in `/etc/NetworkManager/system-connections/` |
+| The hotspot service (on the board) | `/usr/local/lib/quay/quay-hotspot`, `quay-hotspot.service`; its state in `/run/quay-hotspot/` |
 
 | Environment variable | Effect |
 |---|---|
@@ -270,8 +304,11 @@ internal/relay          the download relay's HTTP proxy
 internal/mirror         the mirrors in mainland China and how a speed test ranks them
 internal/source         git fetch (go-git) and local folders → an upload bundle
 internal/remote         the small bash/python scripts run on the board
+internal/remote/hotspot the board's hotspot service (Python, with its own tests)
 internal/core           deploy, update, lifecycle, backup/restore, erase, prepare, mirror
-internal/profile        quay.yaml parsing and built-in profiles (profiles/*.yaml)
+internal/profile        quay.yaml parsing, and app profiles from the profiles repository
+internal/sysprofile     system profiles: recognising a board's system and what it does differently
+internal/hub            Quay's copy of the quay-profiles repository (builtin/), and fetching a newer one
 internal/cli            the command line (cobra)
 internal/legal          copyright notice and the generated third-party license list (embedded)
 internal/gui            the Wails service and the frontend (plain HTML/CSS/JS, no build step)

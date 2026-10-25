@@ -34,7 +34,7 @@ const S = {
 const SHOT = isMock && new URLSearchParams(location.search).has('shot'); // README screenshots (build/screenshots.py)
 if (isMock) window.__quay = { S, get modals() { return S.modals.map((m) => m.type); } };
 if (new URLSearchParams(location.search).has('noanim')) document.head.insertAdjacentHTML('beforeend', '<style>*,*::before,*::after{animation:none!important;transition:none!important}</style>');
-const VISIBLE = new Set(['deploy', 'update', 'start', 'stop', 'restart', 'autostart', 'prepare', 'revert', 'mirror', 'backup', 'restore', 'export', 'erase', 'rename', 'sysupdate', 'relay', 'uploadkey', 'policy', 'policyrestore']);
+const VISIBLE = new Set(['deploy', 'update', 'start', 'stop', 'restart', 'autostart', 'prepare', 'revert', 'mirror', 'backup', 'restore', 'export', 'erase', 'rename', 'sysupdate', 'relay', 'uploadkey', 'policy', 'policyrestore', 'wifi', 'hotspot', 'away', 'sysfix']);
 
 // ---------------------------------------------------------------- rendering scheduler
 const dirty = new Set();
@@ -327,8 +327,13 @@ function errorCard(b, err) {
     <div class="actions"><button class="btn primary" data-act="refresh">${icon('refresh')} ${t('retry')}</button><button class="btn" data-act="edit-board">${icon('edit')} ${t('editBoard')}</button></div></div>`;
 }
 
+// A system profile's finding (another tool's setting that matters here), with its fix.
+function findingHtml(f, busy) {
+  const a = f.action;
+  return `<div class="callout warn finding">${icon('info')}<div class="grow">${esc(zhOr(f.text, f.textZh))}</div>${a ? `<button class="btn sm" data-act="sys-fix" data-id="${esc(f.id)}" ${busy ? 'disabled' : ''}>${esc(zhOr(a.label, a.labelZh))}</button>` : ''}</div>`;
+}
 function warnings(d) {
-  let h = '';
+  let h = (d.findings || []).map((f) => findingHtml(f)).join('');
   if (!d.appcli) h += `<div class="callout warn" style="margin:6px 0 14px">${icon('alert')}<div class="grow">${t('noAppCLI')}</div></div>`;
   else if (!d.isUnoQ) h += `<div class="callout warn" style="margin:6px 0 14px">${icon('info')}<div class="grow">${t('notUnoQ')}</div></div>`;
   return h;
@@ -348,22 +353,24 @@ function overview(d) {
   // The board's operating system on the value line, App CLI and the update state below it.
   const osName = d.os?.version ? `Debian ${d.os.version}${d.os.codename ? ` (${d.os.codename})` : ''}` : d.os?.pretty || '';
   const cliS = cli ? `App CLI ${esc(cli)}` : '';
-  let sysV = esc(osName || cli || '✓'), sysS = [cliS, t('sysCheck')].filter(Boolean).join(' · '), sysDot = '';
+  const sysName = d.system ? `${zhOr(d.system.name, d.system.nameZh)}${d.system.version ? ' ' + d.system.version : ''}` : '';
+  const baseS = d.system ? [d.system.base ? t('sysBase', { v: d.system.base }) : '', osName].filter(Boolean).join(' · ') : '';
+  let sysV = esc(sysName || osName || cli || '✓'), sysS = [baseS, cliS, t('sysCheck')].filter(Boolean).join(' · '), sysDot = '';
   if (!d.appcli) { sysV = esc(osName) || `<span style="color:var(--danger)">${t('notFound')}</span>`; sysS = `App CLI ${t('notFound')}`; }
   const sysOp = S.ops.find((o) => o.kind === 'sysupdate' && o.board === S.cur && o.state === 'run');
   if (sysOp) {
     const st = [...sysOp.steps].reverse().find((x) => x.state === 'run');
     const p = sysOp.progress?.step === st?.key ? sysOp.progress : null;
     sysS = `<b class="accent-text">${esc(st ? stepLabel(st) : t('running'))}${p ? ' · ' + esc(progressText(p)) : ''}</b>` + (p ? progressBar(p) : '');
-  } else if (sys.loading && !u) sysS = [cliS, t('sysChecking')].filter(Boolean).join(' · ');
-  else if (u?.total?.count) { sysS = `${cliS} · <b class="accent-text">${esc(t('sysUpdates', { n: u.total.count }))} · ${mb(u.total.size)}</b>`; sysDot = '<span class="reddot"></span>'; }
-  else if (u) sysS = `${cliS} · ${t('sysUpToDate')}`;
+  } else if (sys.loading && !u) sysS = [baseS, cliS, t('sysChecking')].filter(Boolean).join(' · ');
+  else if (u?.total?.count) { sysS = `${[baseS, cliS].filter(Boolean).join(' · ')} · <b class="accent-text">${esc(t('sysUpdates', { n: u.total.count }))} · ${mb(u.total.size)}</b>`; sysDot = '<span class="reddot"></span>'; }
+  else if (u) sysS = `${[baseS, cliS].filter(Boolean).join(' · ')} · ${t('sysUpToDate')}`;
   const relay = d.relay || {};
   const ri = S.relayInfo || {};
   const busy = busyOp(S.cur, undefined) ? 'disabled' : '';
   return `<section class="overview">
     <div class="stat"><div class="k">${icon('cpu', 'sm')} ${t('model')}</div><div class="v" title="${esc(d.model)}">${esc(d.model || '—')}</div><div class="s">${esc(d.hostname)}${d.serial ? ' · ' + esc(t('serial', { s: d.serial })) : ''}</div></div>
-    <div class="stat"><div class="k">${icon('globe', 'sm')} ${t('network')}</div><div class="v mono selectable">${esc(ip?.ip || t('noIP'))}</div><div class="s">${esc(ip?.iface || '')}${otherIPs ? ' · ' + esc(otherIPs) : ''}</div></div>
+    <div class="stat click" data-act="network" title="${esc(t('netSettings'))}"><div class="k">${icon('globe', 'sm')} ${t('network')}</div><div class="v mono">${esc(ip?.ip || t('noIP'))}</div><div class="s">${esc(netLine(d.net) || [ip?.iface, otherIPs].filter(Boolean).join(' · '))}</div></div>
     <div class="stat click" data-act="system" title="${esc(t('systemUpdate'))}"><div class="k">${icon('package', 'sm')} ${t('sysTitle')}${sysDot}${sys.loading ? ` ${icon('spinner', 'sm spin')}` : ''}</div><div class="v" title="${esc(d.os?.pretty || '')}">${sysV}</div><div class="s">${sysS}</div></div>
     <div class="stat toggle"><div class="k">${icon('download', 'sm')} ${t('mirror')}${helpQ('mirror')}</div>
       <div class="row"><div class="v">${mOn ? t('mirrorOn') : t('mirrorOff')}</div><button class="btn sm ghost speed-btn" data-act="mirror-test" ${busy} title="${esc(t('mirrorTestHelp'))}">${icon('activity', 'sm')} ${t('mirrorSpeedTest')}</button><button class="switch ${mOn ? 'on' : ''}" data-act="mirror" ${busy}></button></div>
@@ -390,6 +397,15 @@ function statusPill(s) {
   return `<span class="pill ${cls}"><span class="dot ${cls === 'ok' ? 'ok' : cls === 'err' ? 'err' : cls === 'warn' ? 'busy' : ''}"></span>${t('st_' + (s || 'stopped'))}</span>`;
 }
 
+
+// A profile's icon wins over the app.yaml emoji (a built-in profile can know the app better). SVG
+// icons are drawn through <img>, where markup from a repository's quay.yaml cannot run scripts.
+function appIcon(prof, fallback) {
+  const ic = (prof?.icon || '').trim();
+  if (!ic.startsWith('<svg')) return `<div class="app-icon">${esc(ic || fallback || '📦')}</div>`;
+  const svg = ic.includes('xmlns=') ? ic : ic.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+  return `<div class="app-icon"><img alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}"></div>`;
+}
 function appCard(a, d) {
   const op = busyOp(S.cur, a.folder);
   const upd = S.updates[S.cur]?.[a.folder];
@@ -434,7 +450,7 @@ function appCard(a, d) {
       <button class="btn sm ghost icon" data-act="app-menu" data-folder="${esc(a.folder)}" title="…">${icon('more', 'sm')}</button>`;
   }
   return `<article class="app-card ${op ? 'busy' : ''}">
-    <div class="app-head"><div class="app-icon">${esc(a.icon || '📦')}</div>
+    <div class="app-head">${appIcon(a.profile, a.icon)}
       <div class="app-title"><div class="name">${esc(a.name)} ${statusPill(a.status)}</div><div class="desc">${esc(a.description || '')}</div></div></div>
     <div class="app-meta">${src}<div class="row">${icon('folder', 'sm')}<span class="t mono">~/ArduinoApps/${esc(a.folder)}</span></div>${a.webUrl ? `<div class="row">${icon('globe', 'sm')}<a class="t mono link${running ? '' : ' off'}" data-act="open-web" data-url="${esc(a.webUrl)}" title="${esc(running ? t('openConsole') : t('consoleNeedsRun'))}">${esc(a.webUrl.replace(/^https?:\/\//, ''))}</a></div>` : ''}${actionsRow(a, running)}</div>
     ${tags.length ? `<div class="app-tags">${tags.join('')}</div>` : ''}
@@ -489,6 +505,7 @@ function actionURL(a, act) {
 const helpQ = (topic) => `<button class="help-q" data-act="help" data-topic="${topic}" title="${esc(t('whatIsThis'))}">?</button>`;
 function helpHtml(topic) {
   if (topic === 'mirror') return `<b>${t('mirror')}</b><p>${t('helpMirror')}</p>`;
+  if (topic === 'away') return `<b>${t('awayTitle')}</b><p>${t('helpAway')}</p>${AWAY_MODES.map((m) => `<div class="pop-sec">${t('away_' + m)}</div><p>${t('helpAway_' + m)}</p>`).join('')}<p class="muted">${t('helpAwayNote')}</p>`;
   const ri = S.relayInfo || {};
   return `<b>${t('relayCard')}</b><p>${t('helpRelay')}</p>
     <div class="pop-row">${icon('link', 'sm')}<span>${esc(t('relayViaNow', { p: ri.effective || t('relayDirect') }))}${ri.upstream ? '' : ` <span class="muted">${t('relaySystem')}</span>`}</span></div>
@@ -511,14 +528,16 @@ function openMenu(anchor, items) {
 function closeMenu() { if (S.menu) { S.menu = null; invalidate('menu'); } }
 function openPopover(anchor, html) {
   const r = anchor.getBoundingClientRect();
-  S.menu = { x: Math.min(r.left - 12, window.innerWidth - 348), y: r.bottom + 6, html, items: [] };
+  const below = window.innerHeight - r.bottom - 18, above = r.top - 18;
+  const up = below < 260 && above > below;
+  S.menu = { x: Math.min(r.left - 12, window.innerWidth - 348), y: r.bottom + 6, top: r.top, up, maxH: Math.min(460, up ? above : below), html, items: [] };
   invalidate('menu');
 }
 function renderMenu() {
   const root = $('#menu-root');
   if (!S.menu) { root.innerHTML = ''; return; }
   const m = S.menu;
-  if (m.html) { root.innerHTML = `<div class="menu pop" style="left:${Math.max(8, m.x)}px;top:${m.y}px">${m.html}</div>`; return; }
+  if (m.html) { root.innerHTML = `<div class="menu pop" style="left:${Math.max(8, m.x)}px;${m.up ? `bottom:${window.innerHeight - m.top + 6}px` : `top:${m.y}px`};max-height:${m.maxH}px">${m.html}</div>`; return; }
   root.innerHTML = `<div class="menu" style="left:${Math.max(8, m.x)}px;${m.flipY ? `bottom:${window.innerHeight - m.top + 6}px` : `top:${m.y}px`}">${m.items.map((it, i) => {
     if (it === '-') return '<hr>';
     if (it.hint) return `<div class="hint">${esc(it.hint)}</div>`;
@@ -678,7 +697,8 @@ const confirm = (o) => pushModal('confirm', o);
 // --- secret prompt (from Go)
 // The sudo prompt comes from Go in English ("Mirror on needs sudo. Password for arduino@duck.local:").
 const SUDO_WHAT = { 'Mirror on': 'mirror', 'Mirror off': 'mirror', 'Relay on': 'relay', 'Relay off': 'relay', 'Refresh the package lists': 'refresh',
-  'Download the updates': 'download', 'Install the updates': 'upgrade', 'Apply system setup': 'system', 'Revert system setup': 'system', 'Rename the board': 'rename' };
+  'Download the updates': 'download', 'Install the updates': 'upgrade', 'Apply system setup': 'system', 'Revert system setup': 'system', 'Rename the board': 'rename',
+  'Save Wi-Fi': 'wifi', 'Remove Wi-Fi': 'wifi', 'Mark Wi-Fi': 'wifi', 'Hotspot settings': 'hotspot', 'Away plan': 'away', Hotspot: 'hotspot', 'System fix': 'sysfix' };
 function promptText(d) {
   if (d.title === 'SSH login') return [t('passwordTitle'), d.message];
   const m = /^(.*) needs sudo\. Password for (.*):$/.exec(d.message || '');
@@ -739,7 +759,7 @@ modalViews.install = (d) => {
   const tabs = `<div class="seg"><button class="${d.tab === 'catalog' ? 'on' : ''}" data-act="install-tab" data-tab="catalog">${icon('puzzle')} ${t('tabCatalog')}</button><button class="${d.tab === 'git' ? 'on' : ''}" data-act="install-tab" data-tab="git">${icon('branch')} ${t('tabGit')}</button><button class="${d.tab === 'local' ? 'on' : ''}" data-act="install-tab" data-tab="local">${icon('folder')} ${t('tabLocal')}</button></div>`;
   let src = '';
   if (d.tab === 'catalog') {
-    src = `<div class="catalog">${(S.info?.catalog || []).map((p) => `<div class="cat-item ${d.catId === p.id ? 'on' : ''}" data-act="pick-cat" data-cat="${esc(p.id)}"><div class="app-icon">🦆</div><div class="t"><b>${esc(p.name)}</b><span>${esc(p.description || '')}</span>${hooks(p).length ? `<span class="cat-hooks">${icon('shield', 'sm')} ${esc(t('catHooks', { list: hooks(p).map((h) => h.title).join(' · ') }))}</span>` : ''}</div><span class="pill">${icon('branch', 'sm')} ${esc(repoLabel(p.source.repo).split('/').slice(1).join('/'))}</span></div>`).join('')}</div>`;
+    src = `<div class="catalog">${(S.info?.catalog || []).map((p) => `<div class="cat-item ${d.catId === p.id ? 'on' : ''}" data-act="pick-cat" data-cat="${esc(p.id)}">${appIcon(p)}<div class="t"><b>${esc(p.name)}</b><span>${esc(p.description || '')}</span>${hooks(p).length ? `<span class="cat-hooks">${icon('shield', 'sm')} ${esc(t('catHooks', { list: hooks(p).map((h) => h.title).join(' · ') }))}</span>` : ''}</div><span class="pill">${icon('branch', 'sm')} ${esc(repoLabel(p.source.repo).split('/').slice(1).join('/'))}</span></div>`).join('')}</div>`;
   } else if (d.tab === 'git') {
     const r = d.refs;
     const opts = [`<option value="">${esc(t('defaultBranch', { b: r?.defaultBranch || '…' }))}</option>`];
@@ -764,7 +784,7 @@ modalViews.install = (d) => {
     const b = d.insp.bundle, p = d.insp.profile;
     const existing = S.status[S.cur]?.data?.apps?.find((a) => a.folder === d.folder);
     preview = `<div class="preview">
-      <div class="top"><div class="app-icon">${esc(b.app.icon || '📦')}</div><div style="min-width:0;flex:1"><b style="font-size:14px">${esc(b.app.name)}</b><div style="color:var(--text-2);font-size:12px;margin-top:2px">${esc(b.app.description || '')}</div></div></div>
+      <div class="top">${appIcon(p, b.app.icon)}<div style="min-width:0;flex:1"><b style="font-size:14px">${esc(b.app.name)}</b><div style="color:var(--text-2);font-size:12px;margin-top:2px">${esc(b.app.description || '')}</div></div></div>
       <dl class="facts">
         <dt>${t('ref')}</dt><dd><code>${esc(b.ref)}</code> · <code>${esc(short(b.commit))}</code>${b.dirty ? ` <span class="pill warn">${t('dirtyWarn')}</span>` : ''} ${esc(b.subject || '')}</dd>
         <dt>${t('files')}</dt><dd>${b.files} · ${esc(when(b.date))}</dd>
@@ -870,6 +890,209 @@ async function editRelayUpstream() {
   const m = { upstream: info.upstream || '', effective: info.effective || '', edit: true };
   if (!(await pushModal('relay', m))) return;
   try { S.relayInfo = await call('SetRelayUpstream', m.upstream.trim()); toast('ok', t('relaySaved')); invalidate('main'); } catch (e) { toast('err', e.message || String(e)); }
+}
+
+// --- network: saved Wi-Fi and the automatic hotspot
+const HOTSPOT_IP = '10.42.0.1';
+const utf8Len = (s) => new TextEncoder().encode(s || '').length;
+const ssidError = (s) => (!s || utf8Len(s) > 32 ? t('ssidLen') : /[;\\\x00-\x1f\x7f]/.test(s) ? t('ssidChars') : s.trim() !== s ? t('ssidSpace') : '');
+const pskError = (p) => (/^[0-9a-fA-F]{64}$/.test(p) ? '' : p.length < 8 || p.length > 63 ? t('pskLen') : /[^\x20-\x7e]/.test(p) ? t('pskChars') : '');
+// netLine sums up the board's Wi-Fi from its status, for the overview card.
+function netLine(n) {
+  if (!n) return '';
+  if (n.hotspot) return t(n.ours ? 'netOnHotspot' : 'netOnOtherHotspot', { ssid: n.ssid }) + (n.ours && n.stations != null ? ' · ' + t('netDevices', { n: n.stations }) : '');
+  const away = n.away && n.away !== 'off' ? t('awayShort', { plan: t('away_' + n.away) }) : '';
+  if (n.state === 100 && n.ssid) return [t('netOnWifi', { ssid: n.ssid }), away].filter(Boolean).join(' · ');
+  return away;
+}
+// The web consoles of the apps installed on the board (from their app.yaml ports or profile), as a
+// phone on the board's hotspot reaches them.
+function hotspotLinks(st) {
+  return (st?.apps || []).flatMap((a) => {
+    try { const u = new URL(a.webUrl); u.hostname = HOTSPOT_IP; return [{ name: a.name, url: u.toString() }]; } catch { return []; }
+  });
+}
+function hotspotState(h) {
+  if (!h.running) return `<span class="danger-text">${t('hsNotRunning')}</span>`;
+  const s = h.state?.state;
+  if (s === 'hotspot') return esc(t('hsOpen')) + (h.state.stations != null ? ' · ' + esc(t('netDevices', { n: h.state.stations })) : '');
+  return esc(t({ wifi: 'hsWifi', 'other-hotspot': 'hsOther', off: 'hsRadioOff' }[s] || 'hsWaiting'));
+}
+const AWAY_MODES = ['off', 'board', 'phone', 'both'];
+const wantsBoard = (m) => m === 'board' || m === 'both';
+const wantsPhone = (m) => m === 'phone' || m === 'both';
+modalViews.network = (d) => {
+  const n = d.net, apps = hotspotLinks(S.status[d.board]?.data);
+  let body;
+  if (d.error) body = `<div class="callout warn" style="margin:0">${icon('alert')}<div class="grow">${esc(d.error)}</div></div>`;
+  else if (!n) body = `<div class="loading-line">${icon('spinner', 'spin')} ${t('netReading')}</div>`;
+  else if (!n.nmcli) body = `<div class="callout warn" style="margin:0">${icon('alert')}<div class="grow">${t('netNoNM')}</div></div>`;
+  else {
+    const h = n.hotspot, act = n.profiles.find((p) => p.active), off = d.busy ? 'disabled' : '', pend = d.pending || {};
+    const now = h.active ? `<b>${esc(t('netOnHotspot', { ssid: h.ssid }))}</b> · <span class="mono">${HOTSPOT_IP}</span>`
+      : act ? `<b>${esc(t(act.phone ? 'netOnPhone' : 'netOnWifi', { ssid: act.ssid || act.id }))}</b>${n.ip ? ` · <span class="mono selectable">${esc(n.ip)}</span>` : ''}`
+      : esc(t('netNoWifi'));
+    const row = (p) => {
+      const notes = [p.mode === 'ap' ? t('netOwnHotspot') : '', p.hidden ? t('netHidden') : '', p.secure ? '' : t('netOpen'), p.autoconnect || p.phone ? '' : t('netManual')].filter(Boolean);
+      return `<div class="net-row">${icon('wifi')}<div class="grow"><b>${esc(p.ssid || p.id)}</b>${p.active ? ` <span class="pill ok">${t('netInUse')}</span>` : ''}${notes.length ? `<div class="sub">${esc(notes.join(' · '))}</div>` : ''}</div>
+        <button class="btn sm ghost icon" data-act="wifi-menu" data-uuid="${esc(p.uuid)}" ${off} title="${esc(t('netMore'))}">${icon('more', 'sm')}</button></div>`;
+    };
+    // A card's header: title, a spinner with what is being done there, and its button.
+    const head = (where, title, extra) => `<div class="net-head"><b>${title}</b>${pend.where === where ? `<span class="net-busy">${icon('spinner', 'sm spin')} ${esc(pend.text)}</span>` : ''}<div class="spacer"></div>${extra}</div>`;
+    const ordinary = n.profiles.filter((p) => !p.phone), phones = n.profiles.filter((p) => p.phone);
+    const wifiCard = `<section class="net-card wifi">${head('wifi', t('netOrdinary'), `<button class="btn sm ghost" data-act="wifi-add" ${off}>${icon('plus', 'sm')} ${t('netAdd')}</button>`)}
+      ${ordinary.length ? ordinary.map(row).join('') : `<p class="net-empty">${t('netNoneSaved')}</p>`}
+      <p class="net-note">${t('netOrdinaryNote')}</p></section>`;
+    const phoneCard = `<section class="net-card phone">${head('phone', t('netPhones'), `<button class="btn sm ghost" data-act="wifi-add" data-phone="1" ${off}>${icon('plus', 'sm')} ${t('netAdd')}</button>`)}
+      ${phones.length ? phones.map(row).join('') : `<p class="net-empty">${t('netNoPhones')}</p>`}
+      <p class="net-note ${phones.length && !wantsPhone(n.away) ? 'warn' : ''}">${t(wantsPhone(n.away) ? 'netPhonesUsed' : 'netPhonesIdle')}</p></section>`;
+    const boardBox = !wantsBoard(n.away) ? '' : !n.ap ? `<div class="callout warn" style="margin:12px 0 0">${icon('info')}<div class="grow">${t('netNoAP')}</div></div>`
+      : `<div class="hs-box"><div class="hs-title">${t('netOwnTitle')}</div><div class="hs-grid">
+          <span class="lbl">${t('hotspotName')}</span><span><b>${esc(h.ssid)}</b> <a class="link" data-act="hotspot-edit">${t('change')}</a></span>
+          <span class="lbl">${t('hotspotNow')}</span><span>${hotspotState(h)}</span>
+          <span class="lbl">${t('hotspotAddr')}</span><span class="mono">${HOTSPOT_IP}</span></div>
+          ${apps.length ? `<div class="hs-sub">${t('hotspotApps')}</div><div class="hs-grid">${apps.map((l) => `<span class="lbl">${esc(l.name)}</span><a class="link mono" data-act="open-web" data-url="${esc(l.url)}">${esc(l.url)}</a>`).join('')}</div>` : ''}
+          <div class="hs-actions">${h.active ? `<button class="btn sm" data-act="hotspot-close" ${off}>${icon('wifi', 'sm')} ${t('hotspotCloseNow')}</button>`
+            : `<button class="btn sm" data-act="hotspot-open" ${off}>${icon('wifi', 'sm')} ${t('hotspotOpenNow')}</button>`}</div></div>`;
+    const seg = AWAY_MODES.map((m) => {
+      const going = pend.where === 'away' && pend.mode === m;
+      return `<button class="${(pend.where === 'away' ? going : n.away === m) ? 'on' : ''}" data-act="away-pick" data-mode="${m}" ${off} ${wantsBoard(m) && !n.ap ? 'disabled' : ''}>${going ? icon('spinner', 'sm spin') + ' ' : ''}${t('away_' + m)}</button>`;
+    }).join('');
+    const awayCard = `<section class="net-card away"><div class="net-head"><b>${t('awayTitle')}</b>${helpQ('away')}<div class="spacer"></div></div>
+      <div class="seg away-seg">${seg}</div>
+      <p class="net-how">${pend.where === 'away' ? `${icon('spinner', 'sm spin')} ${esc(pend.text)}` : t('awayHow_' + n.away)}</p>${boardBox}</section>`;
+    const found = (n.findings || []).map((f) => findingHtml(f, d.busy)).join('');
+    body = `<div class="net-now">${icon('wifi')}<span>${now}</span></div>${found}<div class="net-grid">${wifiCard}${phoneCard}</div>${awayCard}`;
+  }
+  return {
+    cls: 'xwide',
+    html: header('wifi', t('netTitle'), esc(t('netSub', { name: d.board }))) + `<div class="mbody">${body}</div>
+      <footer><button class="btn ghost" data-act="net-refresh" ${(n || d.error) && !d.busy ? '' : 'disabled'}>${icon(d.busy ? 'spinner' : 'refresh', d.busy ? 'sm spin' : 'sm')} ${t('refresh')}</button><div class="spacer"></div><button class="btn primary" data-act="modal-close" data-primary>${t('close')}</button></footer>`,
+  };
+};
+const pskField = (d, help) => field(t('wifiPassword'), `<div class="input-group"><input class="input" type="${d.show ? 'text' : 'password'}" data-bind="psk" value="${esc(d.psk || '')}" autocomplete="new-password" placeholder="${esc(d.pskPh || '')}"><button class="btn" data-act="toggle-show">${t('show')}</button></div>`, `<span class="v-psk">${esc(help)}</span>`);
+// netForm checks the Wi-Fi / hotspot dialogs: [ok, name message, password message].
+function netForm(m) {
+  const d = m.data, sErr = d.ssid ? ssidError(d.ssid) : '';
+  const pErr = d.psk ? pskError(d.psk) : m.type === 'hotspot' && !d.configured ? t('pskNeeded') : '';
+  const help = m.type === 'hotspot' ? (d.configured ? t('pskKeepHelp') : t('pskHelp')) : t('wifiPskHelp');
+  return [!!d.ssid && !sErr && !pErr, sErr || (m.type === 'hotspot' ? t('hotspotNameHelp') : ''), (d.psk && pErr) || help];
+}
+modalViews.hotspot = (d, m) => {
+  const [ok, sMsg, pMsg] = netForm(m);
+  return {
+    html: header('wifi', t('hotspotEditTitle'), t('hotspotOnSub')) + `<div class="mbody">
+      ${field(t('hotspotName'), input('ssid', d.ssid, 'duck', 'autofocus'), `<span class="v-ssid">${esc(sMsg)}</span>`)}
+      ${pskField(d, pMsg)}
+      ${d.configured ? '' : `<div class="callout info" style="margin:0">${icon('info')}<div class="grow">${t('hotspotOnNote')}</div></div>`}</div>
+      <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="modal-ok" data-primary ${ok ? '' : 'disabled'}>${t('save')}</button></footer>`,
+  };
+};
+modalViews.wifiadd = (d, m) => {
+  const [ok, sMsg, pMsg] = netForm(m);
+  const list = d.seen == null ? `<div class="loading-line">${icon('spinner', 'spin')} ${t('wifiScanning')}</div>`
+    : d.seen.length ? `<div class="device-list scroll">${d.seen.map((x) => {
+      const saved = d.saved.includes(x.ssid);
+      return `<div class="device ${saved ? 'static' : ''} ${d.ssid === x.ssid ? 'on' : ''}" ${saved ? '' : `data-act="wifi-pick" data-ssid="${esc(x.ssid)}"`}>${icon('wifi')}<div class="grow"><b>${esc(x.ssid)}</b> <span class="sub">${x.signal}%${x.security ? ' · ' + esc(x.security) : ' · ' + t('netOpen')}</span></div>${saved ? `<span class="pill">${t('wifiSavedPill')}</span>` : d.ssid === x.ssid ? icon('check') : ''}</div>`;
+    }).join('')}</div>`
+    : `<p class="sys-note" style="margin:0 0 12px">${esc(d.seenError || t('wifiNoneInRange'))}</p>`;
+  return {
+    html: header('wifi', d.phone ? t('wifiAddPhoneTitle') : t('wifiAddTitle'), d.phone ? t('wifiAddPhoneSub') : t('wifiAddSub')) + `<div class="mbody">
+      <div class="field"><label class="row-label">${t('wifiInRange')}<button class="btn sm ghost" data-act="wifi-rescan">${icon('refresh', 'sm')} ${t('scan')}</button></label></div>${list}
+      ${field(t('wifiName'), input('ssid', d.ssid, d.phone ? t('wifiPhonePh') : t('wifiNamePh')), `<span class="v-ssid">${esc(sMsg)}</span>`)}
+      ${pskField(d, pMsg)}
+      ${check('phone', d.phone, t('wifiIsPhone'), t('wifiIsPhoneHelp'))}
+      ${check('hidden', d.hidden, t('wifiHidden'))}</div>
+      <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="modal-ok" data-primary ${ok ? '' : 'disabled'}>${t('save')}</button></footer>`,
+  };
+};
+async function openNetwork() {
+  const d = { board: S.cur, net: null, error: '' };
+  const p = pushModal('network', d);
+  loadNetwork(d);
+  await p;
+}
+async function loadNetwork(d) {
+  d.busy = true; invalidate('modal');
+  try { d.net = await runOp(call('Network', d.board)); d.error = ''; } catch (e) { d.error = e.message || String(e); }
+  d.busy = false; invalidate('modal');
+}
+// netOp runs a Wi-Fi change from the network dialog, then reads the board's network again.
+async function netOp(d, kind, start, okMsg, pending) {
+  d.busy = true; d.pending = pending; invalidate('modal');
+  try { await boardOp(kind, start, undefined, okMsg); } catch { /* shown in the activity */ }
+  await loadNetwork(d);
+  d.pending = null; invalidate('modal');
+}
+async function openWifiAdd(nd, phone) {
+  const d = { ssid: '', psk: '', hidden: false, phone: !!phone, seen: null, saved: (nd.net?.profiles || []).map((x) => x.ssid) };
+  const p = pushModal('wifiadd', d);
+  scanWifi(d, nd.board);
+  if (!(await p)) return;
+  netOp(nd, 'wifi', call('WifiAdd', nd.board, d.ssid, d.psk, !!d.hidden, !!d.phone), () => t(d.phone ? 't_phoneSaved' : 't_wifiSaved', { ssid: d.ssid }),
+    { where: d.phone ? 'phone' : 'wifi', text: t('netSaving', { ssid: d.ssid }) });
+}
+async function scanWifi(d, name) {
+  d.seen = null; d.seenError = ''; invalidate('modal');
+  try { d.seen = await runOp(call('WifiScan', name)); } catch (e) { d.seen = []; d.seenError = e.message || String(e); }
+  if (!d.seen.length && S.status[name]?.data?.net?.hotspot) d.seenError = t('wifiNoScanOnHotspot');
+  invalidate('modal');
+}
+// hotspotSettings asks for the board's hotspot name and password; null when cancelled.
+async function hotspotSettings(nd) {
+  const h = nd.net.hotspot;
+  const d = { ssid: h.ssid || S.status[nd.board]?.data?.hostname || nd.board, psk: '', configured: h.configured, pskPh: h.configured ? t('pskKeep') : '' };
+  return (await pushModal('hotspot', d)) ? d : null;
+}
+async function pickAway(mode) {
+  const nd = topModal().data, n = nd.net;
+  if (!n || n.away === mode) return;
+  let ssid = '', psk = '';
+  if (wantsBoard(mode) && !n.hotspot.configured) {
+    const s = await hotspotSettings(nd);
+    if (!s) return;
+    ssid = s.ssid; psk = s.psk;
+  }
+  if (n.hotspot.active && !wantsBoard(mode) && !(await confirm({ icon: 'wifi', title: t('awayLeaveTitle'), text: t('awayLeaveText'), ok: t('away_' + mode) }))) return;
+  netOp(nd, 'away', call('Away', nd.board, mode, ssid, psk), () => t('t_away', { plan: t('away_' + mode) }),
+    { where: 'away', mode, text: t(wantsBoard(mode) && !wantsBoard(n.away) ? 'awaySwitchingInstall' : 'awaySwitching', { plan: t('away_' + mode) }) });
+}
+async function editHotspot() {
+  const nd = topModal().data, s = await hotspotSettings(nd);
+  if (s) netOp(nd, 'away', call('Away', nd.board, nd.net.away, s.ssid, s.psk), () => t('t_hotspotSaved', { ssid: s.ssid }), { where: 'away', mode: nd.net.away, text: t('hotspotSaving') });
+}
+function wifiMenu(uuid, el) {
+  const nd = topModal().data, p = nd.net?.profiles.find((x) => x.uuid === uuid);
+  if (!p) return;
+  const name = p.ssid || p.id;
+  openMenu(el, [
+    { icon: 'wifi', label: p.phone ? t('netMarkOrdinary') : t('netMarkPhone'), fn: () => netOp(nd, 'wifi', call('WifiPhone', nd.board, uuid, !p.phone), () => t(p.phone ? 't_markedOrdinary' : 't_markedPhone', { ssid: name }),
+      { where: p.phone ? 'wifi' : 'phone', text: t('netMoving', { ssid: name }) }) },
+    '-',
+    { icon: 'trash', label: t('netRemove'), danger: true, disabled: p.active, fn: async () => {
+      if (!(await confirm({ icon: 'trash', danger: true, title: esc(t('wifiRmTitle', { ssid: name })), text: t('wifiRmText'), ok: t('netRemove') }))) return;
+      netOp(nd, 'wifi', call('WifiRemove', nd.board, uuid), () => t('t_wifiRemoved', { ssid: name }), { where: p.phone ? 'phone' : 'wifi', text: t('netRemoving', { ssid: name }) });
+    } },
+  ]);
+}
+async function systemFix(id) {
+  const m = topModal(), nd = m?.type === 'network' ? m.data : null;
+  const f = [...(nd?.net?.findings || []), ...(S.status[S.cur]?.data?.findings || [])].find((x) => x.id === id);
+  if (!f?.action) return;
+  const label = zhOr(f.action.label, f.action.labelZh);
+  if (!(await confirm({ icon: 'info', title: esc(label), text: esc(zhOr(f.action.confirm, f.action.confirmZh) || zhOr(f.text, f.textZh)), ok: esc(label) }))) return;
+  if (nd) return netOp(nd, 'sysfix', call('SystemFix', nd.board, id), () => t('t_sysfix', { what: label }), { where: 'away', mode: nd.net.away, text: label + '…' });
+  boardOp('sysfix', call('SystemFix', S.cur, id), undefined, () => t('t_sysfix', { what: label })).catch(() => {});
+}
+async function hotspotNow(open) {
+  const nd = topModal().data, ssid = nd.net.hotspot.ssid;
+  const ok = await confirm({ icon: 'wifi', title: open ? t('hotspotOpenTitle') : t('hotspotCloseTitle'),
+    text: esc(open ? t('hotspotOpenText', { ssid, ip: HOTSPOT_IP }) : t('hotspotCloseText')), ok: open ? t('hotspotOpenNow') : t('hotspotCloseNow') });
+  if (!ok) return;
+  nd.busy = true; invalidate('modal');
+  try { await boardOp('hotspot', call('HotspotNow', nd.board, open), undefined, () => (open ? t('t_hotspotOpening', { ssid }) : t('t_hotspotClosing'))); } catch { /* shown */ }
+  nd.busy = false;
+  closeModal(false);
 }
 
 // --- rename
@@ -1292,6 +1515,8 @@ modalViews.policies = (d) => {
     cls: 'wide',
     html: header('cpu', esc(t('polTitle', { app: a.name })), t('polSub')) + `<div class="mbody">
       <div class="seg"><button class="${d.tab !== 'slots' ? 'on' : ''}" data-act="pol-tab" data-tab="store">${icon('download')} ${t('polStore')}${cat ? ` · ${cat.entries.length}` : ''}</button><button class="${d.tab === 'slots' ? 'on' : ''}" data-act="pol-tab" data-tab="slots">${icon('cpu')} ${t('polSlots')}${active ? ` · ${esc(t('policiesChip', { n: active }))}` : ''}</button></div>
+      ${d.tab !== 'slots' && cat?.sources?.length ? `<div class="pol-from">${icon('link', 'sm')}<span>${t('polFrom', { sources: cat.sources.map((x) => x.page
+        ? `<a class="link" data-act="open-web" data-url="${esc(x.page)}" title="${esc(x.url)}">${esc(x.name)}</a>` : `<span class="mono" title="${esc(x.url)}">${esc(x.name)}</span>`).join(t('listSep')) })}</span></div>` : ''}
       <div class="pol-body">${body}</div>
       <p class="sys-note">${t('polNote')}</p></div>
       <footer><button class="btn ghost" data-act="pol-file" ${st ? '' : 'disabled'}>${icon('folder', 'sm')} ${t('polFromFile')}</button><button class="btn ghost" data-act="pol-index">${t('polIndexes')}</button>
@@ -1440,6 +1665,17 @@ const act = {
     d.off = true; closeModal(true);
   },
   relay: () => toggleRelay(),
+  network: () => openNetwork(),
+  'net-refresh': () => loadNetwork(topModal().data),
+  'wifi-add': ({ phone }) => openWifiAdd(topModal().data, !!phone),
+  'wifi-rescan': () => scanWifi(topModal().data, S.cur),
+  'wifi-pick': ({ ssid }) => { const d = topModal().data; d.ssid = ssid; invalidate('modal'); },
+  'wifi-menu': ({ uuid }, el) => wifiMenu(uuid, el),
+  'away-pick': ({ mode }) => pickAway(mode),
+  'hotspot-edit': () => editHotspot(),
+  'sys-fix': ({ id }) => systemFix(id),
+  'hotspot-open': () => hotspotNow(true),
+  'hotspot-close': () => hotspotNow(false),
   system: () => openSystem(),
   'sys-mode': ({ mode }) => { const d = topModal().data; d.mode = mode; invalidate('modal'); },
   'sys-download': () => { topModal().data.downloadOnly = true; closeModal(true); },
@@ -1541,6 +1777,14 @@ document.addEventListener('input', (ev) => {
   if (m.type === 'install' && k === 'folder') { const h = el.closest('.field')?.querySelector('.help'); if (h) h.textContent = t('folderHelp', { f: el.value }); }
   if (el.type === 'checkbox' && (m.type === 'system' || m.type === 'mirror' || m.type === 'polcheck')) invalidate('modal');
   if (m.type === 'board' && k === 'host' && m.data.found) { const fh = m.data.found.some((b) => (b.host || b.ips?.[0]) === el.value.trim()); if (!fh) $$('#modal-root .device.on').forEach((x) => x.classList.remove('on')); }
+  if (m.type === 'hotspot' || m.type === 'wifiadd') {
+    const [ok, sMsg, pMsg] = netForm(m);
+    const b = $('#modal-root [data-act="modal-ok"]'); if (b) b.disabled = !ok;
+    const hs = $('#modal-root .v-ssid'); if (hs) hs.textContent = sMsg;
+    const hp = $('#modal-root .v-psk'); if (hp) hp.textContent = pMsg;
+    if (k === 'ssid') $$('#modal-root .device.on').forEach((x) => x.classList.remove('on'));
+    if (k === 'phone') invalidate('modal');
+  }
   if (m.type === 'rename' && k === 'name') {
     const v = el.value.trim().toLowerCase(), ok = HOSTNAME_RE.test(v);
     const b = $('#modal-root [data-act="modal-ok"]'); if (b) b.disabled = !ok;
