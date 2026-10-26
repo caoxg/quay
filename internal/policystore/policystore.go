@@ -243,7 +243,6 @@ func (s *Store) open(ctx context.Context, u string) (*http.Response, error) {
 	return resp, nil
 }
 
-// localPath accepts file:// URLs and plain paths.
 // Describe names an index for people: the repository for an index kept on GitHub (read directly or
 // through jsDelivr), with its page; otherwise the file name or the host. page is empty for a local file.
 func Describe(u string) (name, page string) {
@@ -270,6 +269,29 @@ func Describe(u string) (name, page string) {
 	return pu.Host, u
 }
 
+// JSDelivr is the jsDelivr link for a model published on GitHub, for an index entry's mirrors. A
+// raw.githubusercontent.com link maps exactly. jsDelivr does not serve release attachments, so for
+// one it names the same file committed at the repository root under the release's tag, and guessed
+// is true: the author fixes the path if the file lives elsewhere. Other links have none.
+func JSDelivr(u string) (mirror string, guessed bool) {
+	pu, err := url.Parse(u)
+	if err != nil || pu.Scheme != "https" {
+		return "", false
+	}
+	parts := strings.Split(strings.Trim(pu.EscapedPath(), "/"), "/")
+	gh := func(owner, repo, ref string, path ...string) string {
+		return "https://cdn.jsdelivr.net/gh/" + owner + "/" + repo + "@" + ref + "/" + strings.Join(path, "/")
+	}
+	switch {
+	case pu.Host == "raw.githubusercontent.com" && len(parts) >= 4 && parts[2] != "refs":
+		return gh(parts[0], parts[1], parts[2], parts[3:]...), false
+	case pu.Host == "github.com" && len(parts) == 6 && parts[2] == "releases" && parts[3] == "download":
+		return gh(parts[0], parts[1], parts[4], parts[5]), true
+	}
+	return "", false
+}
+
+// localPath accepts file:// URLs and plain paths.
 func localPath(u string) (string, bool) {
 	if strings.HasPrefix(u, "file://") {
 		p, err := url.Parse(u)

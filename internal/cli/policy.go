@@ -244,10 +244,12 @@ func policyInspectCmd() *cobra.Command {
 		Use:   "inspect FILE.onnx",
 		Short: "Show a model's shapes, metadata and checksum, and an index entry to publish it",
 		Long: "Prints what Quay checks in a model, and an entry for a policy index: put the file somewhere\n" +
-			"stable (e.g. a GitHub release), fill in the name, description and license, and send it to the\n" +
-			"index (for the community index: a pull request to github.com/caoxg/quay-policies).",
-		Example: "  quay policy inspect logs/model_5500.onnx --app xgoduck",
-		Args:    cobra.ExactArgs(1),
+			"stable (e.g. a GitHub release, plus the same file committed to the repository, which jsDelivr\n" +
+			"mirrors), fill in the name, description and license, and send it to the index the app's profile\n" +
+			"reads (e.g. for xgoduck, a pull request to github.com/caoxg/awesome-xgo-duck).",
+		Example: "  quay policy inspect logs/model_5500.onnx --app xgoduck\n" +
+			"  quay policy inspect model.onnx --app xgoduck --url https://github.com/you/repo/releases/download/v1/model.onnx",
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, a []string) error {
 			m, err := onnxinfo.ReadFile(a[0])
 			if err != nil {
@@ -312,6 +314,14 @@ func policyInspectCmd() *cobra.Command {
 			if app == "" {
 				app = "PROFILE"
 			}
+			mirrors := ""
+			if mu, guessed := policystore.JSDelivr(url); mu != "" {
+				mirrors = "    mirrors:\n      - " + mu
+				if guessed {
+					mirrors += "  # the same file committed to the repository at that tag; fix the path if it isn't at the root"
+				}
+				mirrors += "\n"
+			}
 			fmt.Printf("\n%s\n", dim("# index entry"))
 			fmt.Printf(`  - id: %s
     app: %s
@@ -320,12 +330,12 @@ func policyInspectCmd() *cobra.Command {
     author: YOU
     description: WHAT IT DOES DIFFERENTLY
     url: %s
-    sha256: %s
+%s    sha256: %s
     size: %d
     license: LICENSE
     trainer: %s
     created: %s
-`, strings.TrimSuffix(strings.ToLower(filepath.Base(a[0])), ".onnx"), app, slot, url, sum, size, trainer, time.Now().Format("2006-01-02"))
+`, strings.TrimSuffix(strings.ToLower(filepath.Base(a[0])), ".onnx"), app, slot, url, mirrors, sum, size, trainer, time.Now().Format("2006-01-02"))
 			return nil
 		},
 	}

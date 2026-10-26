@@ -167,3 +167,21 @@ func TestDescribe(t *testing.T) {
 		}
 	}
 }
+
+func TestJSDelivr(t *testing.T) {
+	for _, c := range []struct {
+		url, mirror string
+		guessed     bool
+	}{
+		{"https://raw.githubusercontent.com/LuwuDynamics/xgoduck_runtime_arduino/466512e/python/xgoduck_walk.onnx", "https://cdn.jsdelivr.net/gh/LuwuDynamics/xgoduck_runtime_arduino@466512e/python/xgoduck_walk.onnx", false},
+		{"https://github.com/alice/duck-walk/releases/download/v1.2/walk.onnx", "https://cdn.jsdelivr.net/gh/alice/duck-walk@v1.2/walk.onnx", true},
+		{"https://raw.githubusercontent.com/alice/duck-walk/refs/heads/main/walk.onnx", "", false}, // a branch moves
+		{"https://github.com/alice/duck-walk/blob/v1/walk.onnx", "", false},
+		{"https://example.com/walk.onnx", "", false},
+		{"http://github.com/alice/duck-walk/releases/download/v1/walk.onnx", "", false},
+	} {
+		if m, g := JSDelivr(c.url); m != c.mirror || g != c.guessed {
+			t.Errorf("JSDelivr(%s) = %q, %v; want %q, %v", c.url, m, g, c.mirror, c.guessed)
+		}
+	}
+}
