@@ -473,7 +473,7 @@ function appCard(a, d) {
   const p = a.profile;
   const tags = [];
   if (a.default) tags.push(`<span class="pill accent">${icon('boot', 'sm')} ${t('runsAtBoot')}</span>`);
-  if (upd?.behind) tags.push(`<span class="pill accent click" data-act="update" data-folder="${esc(a.folder)}"><span class="reddot"></span>${t('updateAvailable')}</span>`);
+  if (upd?.behind) tags.push(`<span class="pill accent click" data-act="whats-new" data-folder="${esc(a.folder)}" title="${esc(t('whatsNewHint'))}"><span class="reddot"></span>${t('updateAvailable')}</span>`);
   if (p) tags.push(`<span class="pill click" data-act="profile-info" data-folder="${esc(a.folder)}" title="${esc(t('whatIsThis'))}">${icon('shield', 'sm')} ${esc(t('profileChip', { name: p.name }))}</span>`);
   if (p?.system && a.systemReady === true) tags.push(`<span class="pill ok">${icon('check', 'sm')} ${t('setupDone')}</span>`);
   if (a.data?.length) tags.push(`<span class="pill" title="${esc(a.data.join(', '))}">${icon('database', 'sm')} ${t('dataFiles', { n: a.data.length })}</span>`);
@@ -488,7 +488,7 @@ function appCard(a, d) {
         ? `<a class="link" data-act="open-web" data-url="${esc(repoWeb(dep.repo))}" title="${esc(repoWeb(dep.repo))}">${esc(repoLabel(dep.repo))}</a>`
         : `<span class="t">${esc(repoLabel(dep.repo))}</span>`}<span>@</span><code>${esc(dep.ref || '')}</code>${dep.commit ? `<code${repoWeb(dep.repo) ? ` class="click" data-act="open-web" data-url="${esc(repoWeb(dep.repo) + '/commit/' + dep.commit)}" title="${esc(dep.commit)}"` : ''}>${esc(short(dep.commit))}${dep.dirty ? '*' : ''}</code>` : ''}</div>`)
       + `<div class="row">${icon('clock', 'sm')}<span class="t">${esc(dep.subject || '')}${dep.subject ? ' · ' : ''}${esc(t('deployed', { when: when(dep.deployedAt) }))}</span>${upd && !upd.behind ? `<span class="latest">${icon('check', 'sm')}${t('isLatest')}</span>` : ''}</div>`
-      + (upd?.behind ? `<div class="row upd" data-act="update" data-folder="${esc(a.folder)}"><span class="reddot"></span><span class="t"><b>${esc(upd.commits > 0 ? t('newCommits', { n: upd.commits }) : t('updateAvailable'))}</b> <code>${esc(short(upd.latest))}</code> ${esc(upd.subject || '')}${upd.date ? ' · ' + esc(when(upd.date)) : ''}</span></div>` : '')
+      + (upd?.behind ? `<div class="row upd" data-act="whats-new" data-folder="${esc(a.folder)}" title="${esc(t('whatsNewHint'))}"><span class="reddot"></span><span class="t"><b>${esc(upd.commits > 0 ? t('newCommits', { n: upd.commits }) : t('updateAvailable'))}</b> <code>${esc(short(upd.latest))}</code> ${esc(upd.subject || '')}${upd.date ? ' · ' + esc(when(upd.date)) : ''}</span></div>` : '')
     : `<div class="row">${icon('info', 'sm')}<span class="t">${t('notByQuay')}</span></div>`
       + (upd?.unknown ? `<div class="row" title="${esc(upd.repo)}">${icon('branch', 'sm')}<span class="t">${t('latestOnGitHub')} <code>${esc(short(upd.latest))}</code> ${esc(upd.subject || '')}${upd.date ? ' · ' + esc(when(upd.date)) : ''}</span></div>` : '');
   // Not while an install or update runs: those apply the setup themselves when asked to.
@@ -615,7 +615,7 @@ function appMenu(anchor, a) {
     ...(a.webUrl ? [{ icon: 'globe', label: t('openConsole'), disabled: !running, fn: () => call('OpenURL', a.webUrl) },
       ...(p?.actions || []).map((x) => ({ icon: 'external', label: zhOr(x.label, x.labelZh), disabled: !running || !actionURL(a, x), fn: () => call('OpenURL', actionURL(a, x)) })), '-'] : []),
     { icon: 'restart', label: t('restart'), disabled: !running, fn: () => act.restart({ folder: a.folder }) },
-    { icon: 'branch', label: t('updateTo'), disabled: !a.deploy || a.deploy.repo.startsWith('local:'), fn: () => openUpdate(a) },
+    { icon: 'branch', label: t('updateTo'), disabled: !a.deploy || a.deploy.repo.startsWith('local:'), fn: () => openUpdate(a, { pick: true }) },
     { icon: 'terminal', label: t('logs'), fn: () => act.logs({ folder: a.folder }) },
     { icon: 'boot', label: a.default ? t('dontRunAtBoot') : t('runAtBoot'), fn: () => doAutostart(a.default ? '' : a.folder) },
     '-',
@@ -904,17 +904,45 @@ modalViews.install = (d) => {
   };
 };
 
-// --- update to version
+// --- update: what the new version changes, and only then the update
+// Clicking "update available" is for reading: the update runs from this dialog's own button.
 modalViews.update = (d) => {
-  const a = d.app, r = d.refs;
-  const opts = r ? [`<option value="">${esc(t('defaultBranch', { b: r.defaultBranch }))}</option>`,
-    ...r.refs.map((x) => `<option value="${esc(x.name)}" ${d.ref === x.name ? 'selected' : ''}>${x.kind === 'tag' ? '🏷 ' : ''}${esc(x.name)} · ${short(x.commit)}${x.commit === a.deploy.commit ? ' ✓' : ''}</option>`)].join('') : '';
+  const a = d.app, c = d.ch, dep = a.deploy, web = repoWeb(dep.repo);
+  const sha = (h) => `<code${web ? ` class="click" data-act="open-web" data-url="${esc(web + '/commit/' + h)}"` : ''} title="${esc(h)}">${esc(short(h))}</code>`;
+  const line = (x) => `<li>${sha(x.hash)}<div class="grow"><div class="subj">${esc(x.subject || '')}</div><div class="sub">${esc([x.author, when(x.date)].filter(Boolean).join(' · '))}</div></div></li>`;
+  const list = (xs) => `<ul class="commits">${xs.map(line).join('')}</ul>`;
+  const head = c?.compare?.head;
+  const opts = (d.refs?.refs || []).map((x) => `<option value="${esc(x.name)}" ${d.ref === x.name ? 'selected' : ''}>${x.kind === 'tag' ? '🏷 ' : ''}${esc(x.name)} · ${short(x.commit)}${x.name === d.refs.defaultBranch ? ' · ' + esc(t('defaultBranchMark')) : ''}${x.commit === dep.commit ? ' ✓' : ''}</option>`).join('');
+  const target = d.pick && d.refs ? `<select class="input sm-select" data-bind="ref">${opts}</select>` : `<code>${esc(c?.ref || d.ref || '')}</code>`;
+  const facts = `<dl class="upd-from-to">
+    <dt>${t('current')}</dt><dd><code>${esc(dep.ref)}</code> ${sha(dep.commit)} <span class="t">${esc(dep.subject || '')}</span>${dep.commitDate ? ` <span class="sub">· ${esc(when(dep.commitDate))}</span>` : ''}</dd>
+    <dt>${t('updateTarget')}</dt><dd>${target}${c?.commit ? ` ${sha(c.commit)} <span class="t">${esc(head?.subject || '')}</span>${head?.date ? ` <span class="sub">· ${esc(when(head.date))}</span>` : ''}` : ''}</dd></dl>`;
+  let body;
+  if (d.error) {
+    body = `<div class="callout warn">${icon('alert')}<div class="grow">${esc(t('changesFailed', { err: d.error }))}</div><button class="btn sm" data-act="update-retry">${t('retry')}</button></div>`;
+  } else if (!c) {
+    body = `<div class="loading-line">${icon('spinner', 'spin')} ${t('changesLoading')}</div>`;
+  } else if (!c.commit) {
+    body = `<div class="callout warn">${icon('alert')}<div class="grow">${esc(c.error || '')}</div></div>`;
+  } else if (c.commit === dep.commit) {
+    body = `<div class="callout info">${icon('check')}<div class="grow">${esc(t('changesNone', { ref: c.ref }))}</div></div>`;
+  } else if (!c.compare) {
+    body = `<div class="callout warn">${icon('info')}<div class="grow">${esc(t('changesNoList', { err: c.error || '' }))}</div></div>`;
+  } else {
+    const x = c.compare, more = x.ahead - x.commits.length;
+    body = (x.ahead ? `<div class="upd-head">${esc(t('newCommits', { n: x.ahead }))}</div>${list(x.commits)}${more > 0 ? `<p class="sub">${esc(t('changesMore', { n: more }))}</p>` : ''}` : '')
+      + (x.behind ? `<div class="callout warn">${icon('alert')}<div class="grow">${esc(t('changesBack', { n: x.behind }))}</div></div>${c.removed?.length ? list(c.removed) : ''}` : '')
+      + (web ? `<a class="link upd-compare" data-act="open-web" data-url="${esc(`${web}/compare/${dep.commit}...${c.commit}`)}">${icon('external', 'sm')} ${t('changesOnWeb')}</a>` : '');
+  }
+  const running = ['running', 'starting'].includes(a.status);
+  const notes = (running ? `<p class="upd-note">${icon('restart', 'sm')} ${esc(t('updateRestarts', { app: a.name }))}</p>` : '')
+    + (a.data?.length ? `<p class="upd-note">${icon('archive', 'sm')} ${t('backupFirst')}</p>` : '');
+  const ready = !!c?.commit && c.commit !== dep.commit;
   return {
-    html: header('branch', esc(t('updateTitle', { app: a.name })), esc(t('updateSub', { repo: repoLabel(a.deploy.repo) }))) + `<div class="mbody">
-      <dl class="facts" style="display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12px;margin:0 0 14px"><dt style="color:var(--muted)">${t('current')}</dt><dd style="margin:0"><code>${esc(a.deploy.ref)}</code> · <code>${short(a.deploy.commit)}</code> ${esc(a.deploy.subject || '')}</dd></dl>
-      ${r ? field(t('version'), `<select class="input" data-bind="ref">${opts}</select>`) : d.error ? `<div class="callout warn">${icon('alert')}<div class="grow">${esc(d.error)}</div></div>` : `<div class="loading-line">${icon('spinner', 'spin')} ${t('checking')}</div>`}
-      ${a.data?.length ? `<p style="color:var(--muted);font-size:12px;margin:4px 0 0">${icon('archive', 'sm')} ${t('backupFirst')}</p>` : ''}</div>
-      <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="do-update-ref" data-primary ${r ? '' : 'disabled'}>${t('update')}</button></footer>`,
+    cls: 'wide',
+    html: header(d.pick ? 'branch' : 'arrowUp', esc(t(d.pick || d.focus ? 'updateTitle' : 'whatsNewTitle', { app: a.name })), esc(t('updateSub', { repo: repoLabel(dep.repo) }))) + `<div class="mbody">
+      ${facts}${body}${ready ? notes : ''}</div>
+      <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="do-update-ref" data-primary ${ready ? '' : 'disabled'} ${d.focus ? 'autofocus' : ''}>${icon('arrowUp', 'sm')} ${c?.compare?.ahead === 0 && c.compare.behind ? t('updateBack') : t('update')}</button></footer>`,
   };
 };
 
@@ -1535,10 +1563,11 @@ async function doPrepare(a, revert) {
   openActivity();
   await boardOp(revert ? 'revert' : 'prepare', (f) => call('Prepare', S.cur, a.folder, revert, f), a.folder, () => (revert ? t('t_revert') : t('t_prepare'))).catch(() => {});
 }
-async function doUpdate(a, ref = '') {
+// doUpdate installs ref, and only the commit expect the user saw (see openUpdate).
+async function doUpdate(a, ref, expect) {
   openActivity();
   try {
-    const res = await boardOp('update', (f) => call('Update', S.cur, a.folder, ref, f), a.folder);
+    const res = await boardOp('update', (f) => call('Update', S.cur, a.folder, ref, expect, f), a.folder);
     if (res && res.previous === res.commit) toast('info', t('t_upToDate', { app: a.name }));
     else toast('ok', t('t_update', { app: a.name }));
     if (res?.needsSetup) setupToast(a.folder);
@@ -1548,11 +1577,22 @@ function setupToast(folder) {
   const a = appByFolder(folder);
   toast('warn', t('needsSetupToast', { app: a?.profile?.name || folder }), { label: t('applySetup'), fn: () => { const x = appByFolder(folder); if (x) doPrepare(x, false); } }, 12000);
 }
-async function openUpdate(a) {
-  const d = { app: a, refs: null, ref: a.deploy.ref };
+// openUpdate shows what updating an app would change (the commits between the installed version and
+// the new one) and updates only when the user says so there. pick: choose another branch or tag;
+// focus: Update has the focus (from the card's Update button, so that stays one click more).
+async function openUpdate(a, { pick = false, focus = false } = {}) {
+  const d = { app: a, pick, focus, ref: a.deploy.ref, ch: null };
   const p = pushModal('update', d);
-  runOp(call('Refs', a.deploy.repo)).then((r) => { d.refs = r; if (!r.refs.some((x) => x.name === d.ref)) d.ref = ''; invalidate('modal'); }).catch((e) => { d.error = e.message; invalidate('modal'); });
-  if (await p) doUpdate(a, d.ref);
+  loadChanges(d);
+  if ((await p) && d.ch) doUpdate(a, d.ch.ref, d.ch.commit);
+}
+function loadChanges(d) {
+  const seq = (d.seq = (d.seq || 0) + 1);
+  d.ch = null; d.error = ''; invalidate('modal');
+  runOp(call('Changes', d.app.deploy.repo, d.ref, d.app.deploy.commit))
+    .then((c) => { if (seq === d.seq) { d.ch = c; d.ref = c.ref; d.refs = c.refs; } })
+    .catch((e) => { if (seq === d.seq) d.error = e.message || String(e); })
+    .finally(() => { if (seq === d.seq) { invalidate('modal'); setTimeout(focusModal, 30); } });
 }
 async function openErase(a) {
   const d = { app: a, backup: true, revert: false, confirm: '' };
@@ -2045,7 +2085,9 @@ const act = {
     try { await boardOp('stop', (f) => call('Stop', S.cur, folder, f), folder, () => t('t_stop', { app: a?.name })); } catch { /* shown */ }
   },
   restart: ({ folder }) => { const a = appByFolder(folder); boardOp('restart', (f) => call('Restart', S.cur, folder, f), folder, () => t('t_restart', { app: a?.name })).catch(() => {}); },
-  update: ({ folder }) => { const a = appByFolder(folder); if (a) doUpdate(a); },
+  update: ({ folder }) => { const a = appByFolder(folder); if (a) openUpdate(a, { focus: true }); },
+  'whats-new': ({ folder }) => { const a = appByFolder(folder); if (a) openUpdate(a); },
+  'update-retry': () => loadChanges(topModal().data),
   prepare: ({ folder }) => { const a = appByFolder(folder); if (a) doPrepare(a, false); },
   logs: ({ folder }) => { const a = appByFolder(folder); if (a) openLogs(a); },
   'app-menu': ({ folder }, el) => { const a = appByFolder(folder); if (a) appMenu(el, a); },
@@ -2247,6 +2289,7 @@ document.addEventListener('input', (ev) => {
 document.addEventListener('change', (ev) => {
   const el = ev.target.closest('[data-bind="repo"]');
   if (el && topModal()?.type === 'install') loadRefs(topModal().data);
+  if (ev.target.dataset?.bind === 'ref' && topModal()?.type === 'update') loadChanges(topModal().data);
 });
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape') {

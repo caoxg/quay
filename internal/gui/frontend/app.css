@@ -597,6 +597,27 @@ table.pol-slots td.n { text-align: right; white-space: nowrap; }
 .upd-facts { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-2); display: flex; flex-direction: column; gap: 3px; }
 .small { font-size: 11.5px; }
 
+/* an app's update: what it changes, then Update */
+.upd-from-to { display: grid; grid-template-columns: max-content 1fr; gap: 7px 14px; align-items: center; margin: 0 0 14px; font-size: 12.5px; }
+.upd-from-to dt { color: var(--muted); font-size: 12px; }
+.upd-from-to dd { margin: 0; min-width: 0; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
+.upd-from-to .t { overflow: hidden; text-overflow: ellipsis; }
+.upd-from-to .sub, .commits .sub, .mbody p.sub { color: var(--muted); font-size: 11.5px; }
+.upd-from-to code, .commits code { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); padding: 0 5px; border-radius: 5px; flex: none; }
+.upd-from-to code.click, .commits code.click { cursor: pointer; }
+.upd-from-to code.click:hover, .commits code.click:hover { border-color: var(--accent); color: var(--accent); }
+.upd-from-to select.sm-select { width: auto; height: 26px; font-size: 12px; padding: 0 6px; flex: none; }
+.upd-head { font-size: 12px; font-weight: 600; color: var(--text-2); margin: 0 0 6px; }
+.commits { list-style: none; margin: 0 0 10px; padding: 4px 0; border: 1px solid var(--border); border-radius: 10px; max-height: 260px; overflow-y: auto; background: var(--surface-2); }
+.commits li { display: flex; gap: 10px; align-items: flex-start; padding: 6px 12px; font-size: 12.5px; }
+.commits li + li { border-top: 1px solid var(--border); }
+.commits li code { margin-top: 1px; background: var(--surface); }
+.commits .grow { flex: 1; min-width: 0; }
+.commits .subj { overflow-wrap: anywhere; }
+.upd-compare { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; margin: 2px 0 8px; cursor: pointer; }
+.upd-note { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; color: var(--text-2); font-size: 12px; }
+.modal .callout { margin: 0 0 10px; }
+
 /* settings */
 .set-row { display: flex; align-items: flex-start; gap: 14px; }
 .set-row .help { margin-top: 3px; font-size: 12px; color: var(--text-2); line-height: 1.5; }

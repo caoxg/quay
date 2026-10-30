@@ -106,6 +106,11 @@ const en = {
   needsSystem: 'Needs a one-time system change (sudo)', commit: 'Commit', files: 'Files', ref: 'Ref', dirtyWarn: 'uncommitted changes',
   // update
   updateTitle: 'Update {app}', updateSub: 'From {repo}', current: 'Installed', latestOn: 'Latest on {ref}',
+  whatsNewTitle: 'What’s new in {app}', whatsNewHint: 'See what the new version changes', updateTarget: 'Update to', defaultBranchMark: 'default',
+  changesLoading: 'Looking up what the new version changes…', changesFailed: 'Can’t look up the new version: {err}', changesNone: '{ref} has nothing newer than what is installed.',
+  changesNoList: 'Quay can’t list the commits in between ({err}). Look at the repository before you update.', changesMore: '{n} more not listed here; GitHub shows them all.',
+  changesBack: 'The installed version has {n} commits this one lacks; they go away with the update (below).', changesOnWeb: 'Compare the code on GitHub',
+  updateRestarts: 'Updating stops {app}, which is running, and starts it again with the new version.', updateBack: 'Go back to it',
   // erase
   eraseTitle: 'Erase {app}?', eraseSub: 'This removes the app from {board}.',
   eraseL1: 'Stops it and removes its containers and caches', eraseL2: 'Deletes ~/ArduinoApps/{f}', eraseL3: 'No app will run at boot afterwards',
@@ -328,6 +333,11 @@ const zh = {
   profileFound: '配置：{name}', profileRepo: '来自 App 的 quay.yaml', profileBuiltin: 'Quay 内置', noProfile: '普通 Arduino App（没有 quay.yaml）',
   needsSystem: '需要一次性修改系统（sudo）', commit: '提交', files: '文件', ref: '版本', dirtyWarn: '有未提交的改动',
   updateTitle: '更新 {app}', updateSub: '来自 {repo}', current: '已安装', latestOn: '{ref} 上的最新版本',
+  whatsNewTitle: '{app} 的新版本改了什么', whatsNewHint: '看看新版本改了什么', updateTarget: '更新到', defaultBranchMark: '默认',
+  changesLoading: '正在查新版本改了什么…', changesFailed: '查不到新版本：{err}', changesNone: '{ref} 上没有比已安装的更新的版本。',
+  changesNoList: '列不出中间的提交（{err}）。更新前可以先去仓库里看看改了什么。', changesMore: '还有 {n} 个没列在这里，GitHub 上能看到全部。',
+  changesBack: '已安装的版本里有 {n} 个提交是这个版本没有的，更新后它们就没了（见下）。', changesOnWeb: '在 GitHub 上对比代码',
+  updateRestarts: '{app} 正在运行，更新时会先停下它，装好新版本后再启动。', updateBack: '退回到这个版本',
   eraseTitle: '删除 {app}？', eraseSub: '这会把这个 App 从 {board} 上移除。',
   eraseL1: '停止它，并移除它的容器和缓存', eraseL2: '删除 ~/ArduinoApps/{f}', eraseL3: '之后开机不会自动运行任何 App',
   eraseBackup: '先备份 data/（{files}）', eraseRevert: '同时撤销它的系统设置（sudo）', eraseConfirm: '输入 {f} 确认', eraseBtn: '删除',

@@ -67,6 +67,9 @@ type DeployOptions struct {
 	Setup bool
 	// BackupDir is where automatic backups go.
 	BackupDir string
+	// Expect (Update only) is the commit the user agreed to install: if the branch has moved on
+	// since, the update stops rather than install commits nobody looked at.
+	Expect string
 }
 
 // DeployResult summarises a deploy.
@@ -263,13 +266,16 @@ func (s *Session) Update(ctx context.Context, sink Sink, cacheDir, key, ref stri
 	}
 	if ref == "" {
 		ref = a.Deploy.Ref
-		if looksLikeCommit(ref) { // pinned to a commit: follow the default branch
+		if LooksLikeCommit(ref) { // pinned to a commit: follow the default branch
 			ref = ""
 		}
 	}
 	b, err := Fetch(ctx, sink, cacheDir, FetchOptions{Repo: a.Deploy.Repo, Ref: ref, Subdir: a.Deploy.Subdir})
 	if err != nil {
 		return nil, err
+	}
+	if opt.Expect != "" && b.Commit != opt.Expect {
+		return nil, fmt.Errorf("%s has moved on to %s since you looked (you agreed to %s); look at what it changes again", b.Ref, shortHash(b.Commit), shortHash(opt.Expect))
 	}
 	if b.Commit == a.Deploy.Commit && !opt.Force {
 		o := s.op(ctx, sink)
@@ -281,7 +287,15 @@ func (s *Session) Update(ctx context.Context, sink Sink, cacheDir, key, ref stri
 	return s.Deploy(ctx, sink, b, opt)
 }
 
-func looksLikeCommit(ref string) bool {
+func shortHash(h string) string {
+	if len(h) > 7 {
+		return h[:7]
+	}
+	return h
+}
+
+// LooksLikeCommit tells a commit hash from a branch or tag name.
+func LooksLikeCommit(ref string) bool {
 	if len(ref) < 7 || len(ref) > 40 {
 		return false
 	}

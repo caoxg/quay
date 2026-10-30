@@ -328,6 +328,20 @@ const mock = {
     after: () => { const a = mockState.apps[0]; a.deploy.commit = '466512e9426f61fb07d9be9b3f20df0171692150'; a.deploy.subject = 'Update XGO Duck runtime and servo protection setup'; a.deploy.deployedAt = new Date().toISOString(); a.status = 'running'; },
   }),
   Update: (b, f) => mock.Deploy({ board: b, folder: f }),
+  // What updating would change: three new commits on master, a branch that went another way.
+  Changes: (repo, ref, base) => simulate('changes', '', '', [], () => {
+    const refs = /xgoduck/.test(repo)
+      ? { url: repo, defaultBranch: 'master', refs: [{ name: 'master', kind: 'branch', commit: '8837d5a3bc7cf3746f6da2b55c7b9191026b9838' }, { name: 'next-audio-video-tof', kind: 'branch', commit: '44b2ac8d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b' }] }
+      : { url: repo, defaultBranch: 'main', refs: [{ name: 'main', kind: 'branch', commit: 'b7e1f0a9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3' }, { name: 'v1.2.0', kind: 'tag', commit: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' }] };
+    const r = refs.refs.find((x) => x.name === ref) || refs.refs.find((x) => x.name === refs.defaultBranch);
+    if (r.commit === base) return { refs, ref: r.name, commit: r.commit };
+    const c = (hash, subject, author, days) => ({ hash, subject, author, date: new Date(Date.now() - days * 864e5).toISOString() });
+    const ahead = !/xgoduck/.test(repo) ? [c(r.commit, 'Show tomorrow’s forecast too', 'example', 3)]
+      : r.name === refs.defaultBranch ? [c(r.commit, 'Add roller walking controls and simplify the user guide', 'LuwuDynamics', 1), c('5f511b9c0e2a4d4b8a6f0c1d2e3f405162738495', 'Smooth actions by default (action_smoothing 0.3)', 'LuwuDynamics', 2), c('3c2b1a09f8e7d6c5b4a3928170615243f4e5d6c7', 'Fix the servo scan timeout', 'LuwuDynamics', 4)]
+      : [c(r.commit, 'Try audio, video and a ToF sensor', 'LuwuDynamics', 6)];
+    const removed = r.name === refs.defaultBranch ? [] : [{ hash: base, subject: 'Add servo scanning functionality', author: 'LuwuDynamics', date: '2026-10-12T08:00:00Z' }];
+    return { refs, ref: r.name, commit: r.commit, compare: { head: ahead[0], ahead: ahead.length, behind: removed.length, commits: ahead }, removed };
+  }),
   Start: (b, f) => simulate('start', b, f, [['start', 'Start', ['App started'], 900]], null, { after: () => { mockState.apps.find((a) => a.folder === f).status = 'running'; } }),
   // The mock duck holds torque while running, so stopping it needs force (like the real safety probe).
   Stop: (b, f, force) => simulate('stop', b, f, !force && f === 'xgoduck_runtime_arduino'

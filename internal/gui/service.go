@@ -1378,9 +1378,71 @@ func (s *Service) Deploy(req DeployRequest) string {
 	})
 }
 
-func (s *Service) Update(boardName, folder, ref string, force bool) string {
+// Update installs ref (empty: the branch the app came from), but only expect, the commit the user
+// saw in Changes; it stops if the branch has moved on since.
+func (s *Service) Update(boardName, folder, ref, expect string, force bool) string {
 	return s.run("update", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
-		return sess.Update(ctx, sink, config.RepoCacheDir(), folder, ref, core.DeployOptions{Force: force, Backup: true, BackupDir: config.BackupsDir()})
+		return sess.Update(ctx, sink, config.RepoCacheDir(), folder, ref, core.DeployOptions{Force: force, Backup: true, BackupDir: config.BackupsDir(), Expect: expect})
+	})
+}
+
+// UpdateChanges is what updating an app to a branch or tag would change, shown before updating.
+type UpdateChanges struct {
+	Refs   *source.RemoteInfo `json:"refs"`   // the repository's branches and tags, to pick another
+	Ref    string             `json:"ref"`    // the branch or tag that would be installed
+	Commit string             `json:"commit"` // what it points to now ("" when it is gone: see Error)
+	// Compare is what moving from the installed commit to Commit changes; nil when the host
+	// cannot tell (only GitHub is asked), with Error saying why.
+	Compare *source.Comparison `json:"compare,omitempty"`
+	// Removed are the installed commits Commit lacks (newest first), when it goes back.
+	Removed []source.Change `json:"removed,omitempty"`
+	Error   string          `json:"error,omitempty"` // why Commit or Compare is missing
+}
+
+// Changes looks up what ref of repo points to right now (empty or a commit hash: the default
+// branch, as Update does) and the commits between base, the installed commit, and it.
+func (s *Service) Changes(repo, ref, base string) string {
+	return s.run("changes", "", "", func(ctx context.Context, _ *core.Session, _ core.Sink) (any, error) {
+		info, err := source.ListRefs(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		out := &UpdateChanges{Refs: info}
+		for _, r := range info.Refs {
+			if r.Name == ref {
+				out.Ref, out.Commit = r.Name, r.Commit
+			}
+		}
+		if out.Commit == "" {
+			if ref != "" && !core.LooksLikeCommit(ref) { // the list still lets the user pick another
+				out.Ref, out.Error = ref, fmt.Sprintf("%s has no branch or tag %q any more", info.URL, ref)
+				return out, nil
+			}
+			for _, r := range info.Refs {
+				if r.Kind == "branch" && r.Name == info.DefaultBranch {
+					out.Ref, out.Commit = r.Name, r.Commit
+				}
+			}
+			if out.Commit == "" {
+				return nil, fmt.Errorf("%s has no branches", info.URL)
+			}
+		}
+		if base == "" || base == out.Commit {
+			return out, nil
+		}
+		// Commits between two fixed hashes never change.
+		v, err := s.remember("compare "+repo+" "+base+" "+out.Commit, time.Hour, func() (any, error) { return source.Compare(ctx, repo, base, out.Commit) })
+		if err != nil {
+			out.Error = err.Error()
+			return out, nil
+		}
+		out.Compare = v.(*source.Comparison)
+		if out.Compare.Behind > 0 {
+			if v, err := s.remember("compare "+repo+" "+out.Commit+" "+base, time.Hour, func() (any, error) { return source.Compare(ctx, repo, out.Commit, base) }); err == nil {
+				out.Removed = v.(*source.Comparison).Commits
+			}
+		}
+		return out, nil
 	})
 }
 
