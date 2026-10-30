@@ -6,10 +6,13 @@ import (
 	"os"
 
 	"github.com/caoxg/quay/internal/cli"
+	"github.com/caoxg/quay/internal/config"
 	"github.com/caoxg/quay/internal/selfupdate"
+	"github.com/caoxg/quay/internal/source"
 )
 
 func main() {
+	source.RepoCache = config.RepoCacheDir() // where installed apps' history is, to pick their profile version
 	selfupdate.HasGUI = guiAvailable
 	selfupdate.WaitForPrevious() // started by a self-update: let the old program exit first
 	selfupdate.Cleanup()

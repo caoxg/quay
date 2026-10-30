@@ -1640,13 +1640,22 @@ func profilesCmd() *cobra.Command {
 			}
 			fmt.Println(dim("profiles of " + snap.Index.Updated + ", " + snap.Source + "; " + how))
 			fmt.Println(bold("App profiles"))
-			for _, p := range profile.Builtins() {
+			for _, p := range profile.Latest() {
 				fmt.Printf("  %s  %s\n", bold(p.Name), dim("("+p.ID+")"))
 				if p.Description != "" {
 					fmt.Printf("    %s\n", p.Description)
 				}
 				if p.Source != nil {
 					fmt.Printf("    %s %s\n", dim("repo"), p.Source.Repo)
+				}
+				var from []string
+				for _, v := range profile.Builtins() {
+					if v.ID == p.ID && v.From != "" {
+						from = append(from, v.From[:7])
+					}
+				}
+				if len(from) > 0 {
+					fmt.Printf("    %s %s\n", dim("versions from commits"), strings.Join(from, ", "))
 				}
 				if p.System != nil {
 					fmt.Printf("    %s %s\n", dim("system"), firstLine(p.System.Description))

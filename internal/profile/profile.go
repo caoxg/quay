@@ -24,7 +24,10 @@ const FileName = "quay.yaml"
 
 // Profile is the parsed quay.yaml.
 type Profile struct {
-	ID          string `yaml:"id" json:"id"`
+	ID string `yaml:"id" json:"id"`
+	// From makes a built-in profile one version of several (same ID): it is for the app's commit
+	// From (a full hash) and every later one, until the next version. Empty: every commit.
+	From        string `yaml:"from" json:"from,omitempty"`
 	Name        string `yaml:"name" json:"name"`
 	Description string `yaml:"description" json:"description,omitempty"`
 	// Icon replaces the app.yaml icon in Quay: an emoji, or inline SVG markup (<svg …>…</svg>).
@@ -220,7 +223,10 @@ func (p *Policies) validate() error {
 	return nil
 }
 
-var slotID = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+var (
+	slotID     = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	commitHash = regexp.MustCompile(`^[0-9a-f]{40}$`)
+)
 
 // Parse decodes and validates a quay.yaml.
 func Parse(b []byte) (*Profile, error) {
@@ -229,6 +235,9 @@ func Parse(b []byte) (*Profile, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&p); err != nil {
 		return nil, fmt.Errorf("%s: %w", FileName, err)
+	}
+	if p.From != "" && !commitHash.MatchString(p.From) {
+		return nil, fmt.Errorf("%s: from must be a full commit hash (40 hex digits)", FileName)
 	}
 	if p.System != nil && strings.TrimSpace(p.System.Apply) == "" {
 		return nil, fmt.Errorf("%s: system.apply is required when system is set", FileName)
@@ -278,8 +287,8 @@ var (
 )
 
 // Builtins returns the app profiles from the profiles repository (hub: the newest copy Quay has,
-// built in or fetched), sorted by name. A file that does not read is replaced by the built-in copy
-// of the same file, if any.
+// built in or fetched), every version, by ID and each profile's versions oldest first. A file that
+// does not read is replaced by the built-in copy of the same file, if any.
 func Builtins() []*Profile {
 	snap := hub.Get()
 	builtinMu.Lock()
@@ -301,14 +310,29 @@ func Builtins() []*Profile {
 		p.Origin = "builtin"
 		out = append(out, p)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	// By ID, the versions of a profile in the index's order (oldest first).
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	builtinFrom, builtinList = snap, out
 	return out
 }
 
-// ByID finds a built-in profile.
-func ByID(id string) *Profile {
+// Latest returns the newest version of each built-in profile, sorted by name.
+func Latest() []*Profile {
+	var out []*Profile
 	for _, p := range Builtins() {
+		if n := len(out); n > 0 && out[n-1].ID == p.ID {
+			out[n-1] = p
+		} else {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// ByID finds the newest version of a built-in profile.
+func ByID(id string) *Profile {
+	for _, p := range Latest() {
 		if p.ID == id {
 			return p
 		}
@@ -316,9 +340,20 @@ func ByID(id string) *Profile {
 	return nil
 }
 
-// Lookup picks the profile for an app: the app's own quay.yaml wins, then a built-in profile that
-// matches the repository URL or the app.yaml name. It returns nil for a generic app.
-func Lookup(repoQuayYAML []byte, repoURL, appName string) (*Profile, error) {
+// At says which commit of its repository an app is at, to pick the version of its profile.
+type At struct {
+	// Ancestor tells, from the repository's history, whether a commit (a version's From) is the
+	// app's commit or one of its ancestors. nil, or an error: the history is not at hand.
+	Ancestor func(from string) (bool, error)
+	// Known is the From of the version picked when the app was installed, for when the history
+	// is not at hand.
+	Known string
+}
+
+// Lookup picks the profile for an app: the app's own quay.yaml wins, then the built-in profile
+// that matches the repository URL or the app.yaml name, in the version for the app's commit (see
+// Pick). It returns nil for a generic app.
+func Lookup(repoQuayYAML []byte, repoURL, appName string, at At) (*Profile, error) {
 	if len(repoQuayYAML) > 0 {
 		p, err := Parse(repoQuayYAML)
 		if err != nil {
@@ -327,22 +362,69 @@ func Lookup(repoQuayYAML []byte, repoURL, appName string) (*Profile, error) {
 		p.Origin = "repo"
 		return p, nil
 	}
+	return Pick(versions(repoURL, appName), at), nil
+}
+
+// versions returns the versions (oldest first) of the built-in profile that matches the
+// repository URL, else the app.yaml name.
+func versions(repoURL, appName string) []*Profile {
+	id := ""
 	norm := NormalizeRepo(repoURL)
 	for _, p := range Builtins() {
 		for _, r := range p.Match.Repos {
-			if norm != "" && NormalizeRepo(r) == norm {
-				return p, nil
+			if id == "" && norm != "" && NormalizeRepo(r) == norm {
+				id = p.ID
 			}
 		}
 	}
 	for _, p := range Builtins() {
 		for _, n := range p.Match.AppNames {
-			if appName != "" && strings.EqualFold(strings.TrimSpace(n), strings.TrimSpace(appName)) {
-				return p, nil
+			if id == "" && appName != "" && strings.EqualFold(strings.TrimSpace(n), strings.TrimSpace(appName)) {
+				id = p.ID
 			}
 		}
 	}
-	return nil, nil
+	var out []*Profile
+	for _, p := range Builtins() {
+		if id != "" && p.ID == id {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// Pick returns the version (versions oldest first) for the commit at says: the newest one whose
+// From is that commit or an ancestor of it, nil when the commit is older than every version.
+// Without the history it takes the version recorded at install (at.Known), else the newest: like
+// a commit newer than every version, a commit Quay cannot place gets the latest profile.
+func Pick(versions []*Profile, at At) *Profile {
+	if at.Ancestor != nil {
+		known := true
+		for i := len(versions) - 1; i >= 0 && known; i-- {
+			v := versions[i]
+			if v.From == "" {
+				return v
+			}
+			ok, err := at.Ancestor(v.From)
+			if err != nil {
+				known = false
+			} else if ok {
+				return v
+			}
+		}
+		if known {
+			return nil
+		}
+	}
+	for _, v := range versions {
+		if at.Known != "" && v.From == at.Known {
+			return v
+		}
+	}
+	if len(versions) > 0 {
+		return versions[len(versions)-1]
+	}
+	return nil
 }
 
 // NormalizeRepo turns https://github.com/A/B.git, git@github.com:A/B and github.com/A/B into

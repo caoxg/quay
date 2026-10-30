@@ -63,6 +63,8 @@ uninstall: |
 
 The first hit wins. `quay profiles` lists the built-in profiles. They are published in [quay-profiles](https://github.com/caoxg/quay-profiles) (`apps/`), separately from Quay, and exist only for apps that do not ship their own file yet.
 
+A built-in profile can come in versions, one per commit of the app it starts from (`from:`, a full hash): Quay takes the newest version whose `from` is the app's commit or one of its ancestors, from the git history it fetched when installing, and records it on the board. An app's own `quay.yaml` needs no versions: it changes with the app. Only apps installed through Quay get a profile; one installed some other way is a plain app.
+
 ## How hooks run
 
 | Hook | Runs as | Working directory | When |

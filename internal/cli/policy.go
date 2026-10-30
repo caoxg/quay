@@ -98,7 +98,7 @@ func policySearchCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, a []string) error {
 			ctx, cancel := signalContext()
 			defer cancel()
-			profiles := profile.Builtins()
+			profiles := profile.Latest()
 			if len(a) == 1 {
 				p := profile.ByID(a[0])
 				if p == nil {
@@ -358,7 +358,7 @@ func policyIndexCmd() *cobra.Command {
 				return err
 			}
 			if len(a) == 0 {
-				for _, s := range policystore.Sources(profile.Builtins(), nil) {
+				for _, s := range policystore.Sources(profile.Latest(), nil) {
 					fmt.Println(s.URL + dim("  (community)"))
 				}
 				for _, u := range cfg.PolicyIndexes {

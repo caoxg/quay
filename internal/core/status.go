@@ -13,6 +13,7 @@ import (
 	"github.com/caoxg/quay/internal/board"
 	"github.com/caoxg/quay/internal/profile"
 	"github.com/caoxg/quay/internal/remote"
+	"github.com/caoxg/quay/internal/source"
 	"github.com/caoxg/quay/internal/sysprofile"
 	"gopkg.in/yaml.v3"
 )
@@ -126,8 +127,10 @@ type Deployment struct {
 	Subdir     string    `json:"subdir,omitempty"`
 	Dirty      bool      `json:"dirty,omitempty"`
 	Profile    string    `json:"profile,omitempty"`
-	DeployedAt time.Time `json:"deployedAt"`
-	Quay       string    `json:"quay"`
+	// ProfileFrom is the version of the profile picked for this commit (its From).
+	ProfileFrom string    `json:"profileFrom,omitempty"`
+	DeployedAt  time.Time `json:"deployedAt"`
+	Quay        string    `json:"quay"`
 }
 
 type rawStatus struct {
@@ -286,14 +289,13 @@ func (s *Session) Status(ctx context.Context) (*Status, error) {
 		if a.Name == "" {
 			a.Name = f.Folder
 		}
-		repo := ""
-		if a.Deploy != nil {
-			repo = a.Deploy.Repo
-		}
-		if p, err := profile.Lookup([]byte(f.QuayYAML), repo, ay.Name); err == nil && p != nil {
-			if !a.ByQuay() {
-				a.Match = p
-			} else {
+		if !a.ByQuay() {
+			a.Match, _ = profile.Lookup([]byte(f.QuayYAML), "", ay.Name, profile.At{}) // its newest version
+		} else {
+			// The version of the profile for the installed commit: from the repository's history
+			// on this computer, else the one picked when it was installed.
+			at := profile.At{Ancestor: source.Ancestry(a.Deploy.Repo, a.Deploy.Commit), Known: a.Deploy.ProfileFrom}
+			if p, err := profile.Lookup([]byte(f.QuayYAML), a.Deploy.Repo, ay.Name, at); err == nil && p != nil {
 				a.Profile = p
 				if p.System != nil && strings.TrimSpace(p.System.Check) != "" {
 					checks = append(checks, f.Folder+"\t"+strings.ReplaceAll(p.System.Check, "\n", " ; "))

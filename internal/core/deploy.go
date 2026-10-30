@@ -96,7 +96,7 @@ type DeployResult struct {
 // Deploy installs or updates an app from a bundle, keeping its data/.
 func (s *Session) Deploy(ctx context.Context, sink Sink, b *source.Bundle, opt DeployOptions) (*DeployResult, error) {
 	o := s.op(ctx, sink)
-	prof, err := profile.Lookup(b.QuayYAML, b.Repo, b.App.Name)
+	prof, err := profile.Lookup(b.QuayYAML, b.Repo, b.App.Name, profile.At{Ancestor: b.Ancestor})
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +186,7 @@ func (s *Session) Deploy(ctx context.Context, sink Sink, b *source.Bundle, opt D
 	meta := Deployment{Repo: b.Repo, Ref: b.Ref, Commit: b.Commit, Subject: b.Subject, CommitDate: b.Date, Subdir: b.Subdir,
 		Dirty: b.Dirty, DeployedAt: time.Now().UTC(), Quay: version.Version}
 	if prof != nil {
-		meta.Profile = prof.ID
+		meta.Profile, meta.ProfileFrom = prof.ID, prof.From
 	}
 	mj, _ := json.Marshal(meta)
 	if err := o.step("install", "Install into ~/ArduinoApps/"+folder+" (data/ kept)", func() error {

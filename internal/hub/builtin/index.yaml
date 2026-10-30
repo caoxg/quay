@@ -1,9 +1,14 @@
 # Quay's profiles (https://github.com/caoxg/quay-profiles): app profiles for apps that do not
 # ship a quay.yaml, and system profiles for board systems other than the stock image. Quay keeps
 # this copy and uses the repository's when it is newer (`updated`).
-schema: 1
-updated: "2026-10-26"
+# Schema 2: an app profile can come in versions, one file per first commit of the app it is for
+# (`from`), listed oldest first. Quay before 0.3 reads only schema 1 and keeps its own copy.
+schema: 2
+updated: "2026-10-31"
 apps:
-  - apps/xgoduck.yaml
+  - apps/xgoduck/5f1954a.yaml
+  - apps/xgoduck/8cdbbd8.yaml
+  - apps/xgoduck/8837d5a.yaml
+  - apps/xgoduck/5f511b9.yaml
 systems:
   - systems/duck-os.yaml

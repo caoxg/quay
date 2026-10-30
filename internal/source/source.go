@@ -46,6 +46,12 @@ type Bundle struct {
 	Folder   string    `json:"folder"`           // suggested folder name under ~/ArduinoApps
 	Files    int       `json:"files"`
 	Tar      []byte    `json:"-"`
+	history  string    // the git repository it came from, for Ancestor
+}
+
+// Ancestor tells whether from is the bundle's commit or one of its ancestors (see Ancestry).
+func (b *Bundle) Ancestor(from string) (bool, error) {
+	return ancestry(b.history, b.Commit)(from)
 }
 
 // AppYAML is the part of Arduino's app manifest Quay shows.
@@ -166,8 +172,7 @@ func RemoteCommit(ctx context.Context, url, ref string) (string, error) {
 // Fetch clones or updates the repository in cacheDir and bundles ref (empty = default branch).
 func Fetch(ctx context.Context, cacheDir, url, ref, subdir string, progress io.Writer) (*Bundle, error) {
 	url = NormalizeURL(url)
-	sum := sha1.Sum([]byte(strings.ToLower(url)))
-	dir := filepath.Join(cacheDir, hex.EncodeToString(sum[:8]))
+	dir := repoDir(cacheDir, url)
 	refspecs := []gitcfg.RefSpec{"+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"}
 
 	repo, err := git.PlainOpen(dir)
@@ -217,11 +222,64 @@ func Fetch(ctx context.Context, cacheDir, url, ref, subdir string, progress io.W
 			return nil, fmt.Errorf("no folder %q in %s@%s", subdir, url, ref)
 		}
 	}
-	b := &Bundle{Repo: url, Ref: ref, Commit: hash.String(), Subject: firstLine(commit.Message), Date: commit.Committer.When, Subdir: subdir, Folder: folderName(url, subdir)}
+	b := &Bundle{Repo: url, Ref: ref, Commit: hash.String(), Subject: firstLine(commit.Message), Date: commit.Committer.When, Subdir: subdir, Folder: folderName(url, subdir), history: dir}
 	if err := bundleTree(b, tree, commit.Committer.When); err != nil {
 		return nil, err
 	}
 	return b, nil
+}
+
+// RepoCache is the folder this program's Fetch keeps repositories in (set at startup), where
+// Ancestry looks for an installed app's history.
+var RepoCache string
+
+func repoDir(cacheDir, url string) string {
+	sum := sha1.Sum([]byte(strings.ToLower(NormalizeURL(url))))
+	return filepath.Join(cacheDir, hex.EncodeToString(sum[:8]))
+}
+
+// Ancestry tells, from the history Fetch keeps in RepoCache (or a local folder's own git, for
+// "local:" apps), whether a commit is commit or one of its ancestors. It returns nil when that
+// history is not here, and an error when it does not hold commit.
+func Ancestry(url, commit string) func(from string) (bool, error) {
+	dir := strings.TrimPrefix(url, "local:")
+	if dir == url {
+		if RepoCache == "" {
+			return nil
+		}
+		dir = repoDir(RepoCache, url)
+	}
+	if _, err := os.Stat(dir); err != nil || commit == "" {
+		return nil
+	}
+	return ancestry(dir, commit)
+}
+
+func ancestry(dir, commit string) func(from string) (bool, error) {
+	return func(from string) (bool, error) {
+		if dir == "" || commit == "" {
+			return false, errors.New("no git history")
+		}
+		repo, err := git.PlainOpenWithOptions(dir, &git.PlainOpenOptions{DetectDotGit: true})
+		if err != nil {
+			return false, err
+		}
+		c, err := repo.CommitObject(plumbing.NewHash(commit))
+		if err != nil {
+			return false, fmt.Errorf("commit %s is not in %s: %w", commit, dir, err)
+		}
+		if from == c.Hash.String() {
+			return true, nil
+		}
+		f, err := repo.CommitObject(plumbing.NewHash(from))
+		if errors.Is(err, plumbing.ErrObjectNotFound) {
+			return false, nil // not in the history that holds commit, so not one of its ancestors
+		}
+		if err != nil {
+			return false, err
+		}
+		return f.IsAncestor(c)
+	}
 }
 
 func resolve(repo *git.Repository, ref string) (plumbing.Hash, error) {
@@ -348,7 +406,7 @@ func FromDir(dir string) (*Bundle, error) {
 	b := &Bundle{Repo: "local:" + abs, Ref: "working tree", Date: time.Now(), Folder: sanitize(filepath.Base(abs))}
 	if repo, err := git.PlainOpenWithOptions(abs, &git.PlainOpenOptions{DetectDotGit: true}); err == nil {
 		if head, err := repo.Head(); err == nil {
-			b.Commit = head.Hash().String()
+			b.Commit, b.history = head.Hash().String(), abs
 			if head.Name().IsBranch() {
 				b.Ref = head.Name().Short()
 			}

@@ -151,7 +151,7 @@ func (s *Service) Info() Info {
 		lang = cfg.Lang
 	}
 	var catalog []*profile.Profile
-	for _, p := range profile.Builtins() {
+	for _, p := range profile.Latest() {
 		if p.Source != nil {
 			catalog = append(catalog, p)
 		}
@@ -1339,7 +1339,7 @@ func (s *Service) Inspect(req InspectRequest) string {
 		if err != nil {
 			return nil, err
 		}
-		p, err := profile.Lookup(b.QuayYAML, b.Repo, b.App.Name)
+		p, err := profile.Lookup(b.QuayYAML, b.Repo, b.App.Name, profile.At{Ancestor: b.Ancestor})
 		if err != nil {
 			return nil, err
 		}

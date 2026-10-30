@@ -247,8 +247,13 @@ func TestEndToEnd(t *testing.T) {
 		boardSum := func(p string) string { return strings.Fields(sh(t, "sha256sum "+p))[0] }
 		stock := boardSum(walk)
 		ps, err := s.Policies(ctx, folder)
-		if err != nil || len(ps.Slots) != 5 || ps.Slots[0].ID != "walk" || ps.Slots[0].Active != nil || ps.Slots[0].SHA256 != stock {
+		if err != nil || ps.Slots[0].ID != "walk" || ps.Slots[0].Active != nil || ps.Slots[0].SHA256 != stock {
 			t.Fatalf("policies: %+v %v", ps, err)
+		}
+		// The profile version for the installed commit has a slot for each model the runtime has.
+		models := strings.Fields(sh(t, "cd "+appDir+"/python && ls *.onnx"))
+		if len(ps.Slots) != len(models) {
+			t.Fatalf("%d slots for %d models (%v)", len(ps.Slots), len(models), models)
 		}
 		raw, err := exec.Command("docker", "exec", container, "cat", walk).Output()
 		if err != nil {

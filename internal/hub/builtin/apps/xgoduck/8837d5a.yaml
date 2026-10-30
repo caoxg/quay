@@ -1,6 +1,9 @@
 # Built-in Quay profile for XGO-Duck (Luwu Dynamics), used until the runtime repository ships its
 # own quay.yaml. It only drives scripts that already live in that repository.
 id: xgoduck
+# For the runtime from commit 8837d5a (2026-10-23) on, until the next version in index.yaml. What changes
+# between the versions is the policy slots, which follow the runtime's python/*.onnx.
+from: 8837d5a3bc7cf3746f6da2b55c7b9191026b9838
 name: XGO-Duck
 description: Duck-shaped biped robot (Microduck lineage) — walking, get-up and pick policies at 50 Hz.
 # The robot seen from the side (white head with a yellow plate, servo neck, yellow feet); the

@@ -555,7 +555,7 @@ function hooks(p) {
 function hooksHtml(p) {
   const list = hooks(p);
   if (!list.length) return '';
-  const from = p.origin === 'repo' ? t('hooksFromRepo') : t('hooksBuiltin', { name: p.name });
+  const from = (p.origin === 'repo' ? t('hooksFromRepo') : t('hooksBuiltin', { name: p.name })) + (p.from ? ' ' + t('profileFromNote', { c: short(p.from) }) : '');
   return `<p class="hooks-from">${esc(from)} ${t('hooksOnlyQuay')}</p>
     <ul class="hooks">${list.map((h) => `<li>${icon(h.icon, 'sm')}<div><b>${esc(h.title)}</b>${h.text ? `<span>${esc(h.text)}</span>` : ''}</div></li>`).join('')}</ul>`;
 }

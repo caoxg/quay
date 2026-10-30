@@ -303,7 +303,7 @@ safety: { url: http://127.0.0.1:9527/api/status, field: enabled, message: 先关
 web: { port: 9527 }
 ```
 
-完整说明见 [docs/quay-yaml.md](docs/quay-yaml.md)（英文）。对于还没有自带 `quay.yaml` 的已知应用，Quay 有自己的配置（`quay profiles` 可列出）。这些配置单独发布在 [quay-profiles](https://github.com/caoxg/quay-profiles) 仓库里：Quay 自带一份，每天大约两次去拉新版，所以改配置不用等 Quay 发版。目前只有一份，用于 [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino)。它是为 Quay 编写的，只调用那个仓库里现成的脚本，不由陆吾智能维护。App 仓库里的 `quay.yaml` 永远优先。
+完整说明见 [docs/quay-yaml.md](docs/quay-yaml.md)（英文）。对于还没有自带 `quay.yaml` 的已知应用，Quay 有自己的配置（`quay profiles` 可列出）。这些配置单独发布在 [quay-profiles](https://github.com/caoxg/quay-profiles) 仓库里：Quay 自带一份，每天大约两次去拉新版，所以改配置不用等 Quay 发版。目前只有一份，用于 [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino)。它是为 Quay 编写的，只调用那个仓库里现成的脚本，不由陆吾智能维护。它按运行时的提交分版本（运行时的策略模型从 3 个变成了 8 个），Quay 按要装的提交挑对应的版本。App 仓库里的 `quay.yaml` 永远优先。
 
 ### 板子的系统
 

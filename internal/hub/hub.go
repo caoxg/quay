@@ -30,8 +30,9 @@ var (
 	IndexMirrors = []string{"https://cdn.jsdelivr.net/gh/caoxg/quay-profiles@main/index.yaml"}
 )
 
-// Schema is the newest repository layout this Quay reads.
-const Schema = 1
+// Schema is the newest repository layout this Quay reads. 2: an app profile can come in versions
+// (several files with one id, oldest first, each with the first app commit it is for in from).
+const Schema = 2
 
 // Index is index.yaml at the top of the repository.
 type Index struct {

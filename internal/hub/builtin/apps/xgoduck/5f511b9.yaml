@@ -1,0 +1,152 @@
+# Built-in Quay profile for XGO-Duck (Luwu Dynamics), used until the runtime repository ships its
+# own quay.yaml. It only drives scripts that already live in that repository.
+id: xgoduck
+# For the runtime from commit 5f511b9 (2026-10-30) on, until the next version in index.yaml. What changes
+# between the versions is the policy slots, which follow the runtime's python/*.onnx.
+from: 5f511b9623fac2e1fd22c0ef935af9bb8c68c31a
+name: XGO-Duck
+description: Duck-shaped biped robot (Microduck lineage) — walking, get-up and pick policies at 50 Hz.
+# The robot seen from the side (white head with a yellow plate, servo neck, yellow feet); the
+# runtime's own app.yaml uses the 🦆 emoji.
+icon: |
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+    <g stroke="#2b2f33" stroke-width="1.6" stroke-linejoin="round">
+      <path d="M21 44h8l-1 7h-6z" fill="#d5d8dc"/>
+      <rect x="22.5" y="50" width="4.5" height="7" fill="#2b2f33"/>
+      <rect x="18" y="56.5" width="12" height="4" rx="1.5" fill="#d9ab00"/>
+      <rect x="14.5" y="33" width="4" height="13" rx="1" fill="#2f6f8f"/>
+      <rect x="18" y="33.5" width="22" height="12" rx="3.5" fill="#fff"/>
+      <path d="M30 44h8.5l-1 7h-6.5z" fill="#fff"/>
+      <rect x="32" y="50" width="4.5" height="7" fill="#2b2f33"/>
+      <rect x="30" y="56.5" width="13.5" height="4" rx="1.5" fill="#f6c700"/>
+      <path d="M28 27h5.5l2.5 8h-5.5z" fill="#2b2f33"/>
+      <path d="M9.5 24.5h50.5a1.8 1.8 0 0 1 0 4H9.5a1.8 1.8 0 0 1 0-4z" fill="#f6c700"/>
+      <path d="M12 25.5C8.5 25.5 7.5 22 8.5 18.5C10 13.5 15 11.5 22 10.5L45 7.5C53 6.6 57.5 10.5 57.5 17V25.5Z" fill="#fff"/>
+      <circle cx="48.5" cy="16" r="4" fill="#2b2f33"/>
+    </g>
+    <circle cx="49.4" cy="15.1" r="1.4" fill="#fff"/>
+  </svg>
+folder: xgoduck_runtime_arduino
+source:
+  repo: https://github.com/LuwuDynamics/xgoduck_runtime_arduino
+match:
+  repos:
+    - github.com/LuwuDynamics/xgoduck_runtime_arduino
+  app_names:
+    - XGO Duck
+
+system:
+  description: >-
+    Sets the Linux↔MCU router serial link to 2 Mbps (the runtime's tools/router-2m.sh).
+    The setting is global: other apps that expect the stock 115200 baud stop working until it is reverted.
+  description_zh: >-
+    把 Linux 和 MCU 之间的路由串口提速到 2 Mbps（运行时自带的 tools/router-2m.sh）。
+    这是全板设置：其他按默认 115200 波特率工作的 App 在撤销前都会失灵。
+  check: grep -qs 2000000 /etc/systemd/system/arduino-router.service.d/90-xgoduck-baud.conf
+  apply: bash tools/router-2m.sh
+  revert: |
+    rm -f /etc/systemd/system/arduino-router.service.d/90-xgoduck-baud.conf
+    systemctl daemon-reload
+    systemctl restart arduino-router
+  stop_app: true
+
+before_start:
+  run: python3 tools/prepare-bridge.py
+  description: Patches the RouterBridge and RPClite libraries the sketch uses (a bigger RPC stack, bounded message framing) and rebuilds the firmware when they change.
+  description_zh: 给固件用到的 RouterBridge、RPClite 库打补丁（更大的 RPC 栈、限定长度的消息帧），库有变化时自动重新编译固件。
+  resolve_on_failure: true
+  rebuild_when_changed:
+    - .arduino15/internal/Arduino_RouterBridge_*/Arduino_RouterBridge/src/bridge.h
+    - .arduino15/internal/Arduino_RPClite_*/Arduino_RPClite/src/decoder.h
+    - .arduino15/internal/Arduino_RPClite_*/Arduino_RPClite/src/duck_msgpack_frame.h
+
+health:
+  url: http://127.0.0.1:9527/api/status
+  timeout: 240
+
+safety:
+  url: http://127.0.0.1:9527/api/status
+  field: enabled
+  message: The servos are powered (torque on). Turn torque off in the duck's web UI or put the duck down first.
+  also:
+    - field: mode
+      equals: [calibrate, servo_debug]
+      message: Calibration or servo setup is open in the duck's web UI, and servos may be holding. Exit it first.
+
+web:
+  port: 9527
+
+policies:
+  # The runtime loads every model from python/ when it starts (python/controller.py).
+  dir: python
+  input: [1, 61]
+  output: [1, 14]
+  match_metadata: [joint_names, observation_names]
+  # The unofficial community collection (policies/index.yaml), with a CDN copy for networks where
+  # GitHub's raw files are slow.
+  index:
+    url: https://raw.githubusercontent.com/caoxg/awesome-xgo-duck/main/policies/index.yaml
+    mirrors:
+      - https://cdn.jsdelivr.net/gh/caoxg/awesome-xgo-duck@main/policies/index.yaml
+  slots:
+    - id: walk
+      file: xgoduck_walk.onnx
+      name: Walk
+      name_zh: 行走
+      description: Default walking model, also used for the recovery walk.
+    - id: roller
+      file: xgoduck_roller.onnx
+      name: Roller walk
+      name_zh: 轮滑
+      description: Used in Roller mode. The runtime takes its home pose from the model's default_joint_pos.
+      require_metadata: [default_joint_pos]
+    - id: getup
+      file: xgoduck_getup.onnx
+      name: Get up
+      name_zh: 起身
+      description: Runs after a fall (tilt above 55° for 0.15 s) until the duck stands again.
+    - id: pick
+      file: xgoduck_pick.onnx
+      name: Pick
+      name_zh: 啄食
+      description: One 4 s pick cycle, played while walking upright.
+    - id: roulade
+      file: xgoduck_roulade.onnx
+      name: Roulade
+      name_zh: 翻滚
+      description: The 1.9 s roulade move.
+    - id: sitstand
+      file: xgoduck_sitstand.onnx
+      name: Sit
+      name_zh: 坐下
+      description: Used by Sit in the duck's web page, which sits the duck down and stands it up again.
+    - id: ballkick_left
+      file: xgoduck_ballkick_left.onnx
+      name: Left kick
+      name_zh: 左脚踢球
+      description: Used by left_kick in the duck's web page.
+    - id: ballkick_right
+      file: xgoduck_ballkick_right.onnx
+      name: Right kick
+      name_zh: 右脚踢球
+      description: Used by right_kick in the duck's web page.
+
+actions:
+  - label: Calibration
+    label_zh: 标定
+    url: /calibrate.html
+    description: Set each servo's center, with the duck in its center pose.
+  - label: Servo setup
+    label_zh: 舵机设置
+    url: /servo.html
+    description: Scan the bus, set servo IDs and protection.
+
+uninstall:
+  description: Puts back the library files prepare-bridge.py patched.
+  description_zh: 把 prepare-bridge.py 打过补丁的库文件恢复原样。
+  run: |
+    for f in "$HOME"/.arduino15/internal/Arduino_RouterBridge_*/Arduino_RouterBridge/src/bridge.h.original \
+             "$HOME"/.arduino15/internal/Arduino_RPClite_*/Arduino_RPClite/src/decoder.h.original; do
+      if [ -f "$f" ]; then mv -f "$f" "${f%.original}"; fi
+    done
+    rm -f "$HOME"/.arduino15/internal/Arduino_RPClite_*/Arduino_RPClite/src/duck_msgpack_frame.h

@@ -273,7 +273,7 @@ safety: { url: http://127.0.0.1:9527/api/status, field: enabled, message: Turn t
 web: { port: 9527 }
 ```
 
-The full reference is in [docs/quay-yaml.md](docs/quay-yaml.md). For known apps that do not ship a `quay.yaml` yet, Quay has profiles of its own (`quay profiles` lists them). They are published in [quay-profiles](https://github.com/caoxg/quay-profiles), separately from Quay: Quay carries a copy and fetches a newer one about twice a day, so a profile can be fixed without a Quay release. Currently there is one, for [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino). It was written for Quay and only drives scripts that already live in that repository; it is not maintained by Luwu Dynamics. A `quay.yaml` in the repository always wins.
+The full reference is in [docs/quay-yaml.md](docs/quay-yaml.md). For known apps that do not ship a `quay.yaml` yet, Quay has profiles of its own (`quay profiles` lists them). They are published in [quay-profiles](https://github.com/caoxg/quay-profiles), separately from Quay: Quay carries a copy and fetches a newer one about twice a day, so a profile can be fixed without a Quay release. Currently there is one, for [XGO-Duck](https://github.com/LuwuDynamics/xgoduck_runtime_arduino). It was written for Quay and only drives scripts that already live in that repository; it is not maintained by Luwu Dynamics. It comes in versions by the runtime commit they start from (the runtime went from 3 policy models to 8), and Quay picks the one for the commit it installs. A `quay.yaml` in the repository always wins.
 
 ### Board systems
 
