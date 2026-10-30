@@ -67,7 +67,7 @@ def scenes(page: Page, lang: str) -> None:
     start(page, lang)
     shot(page, "overview", lang)
 
-    page.click("[data-act=mirror]")
+    page.click("[data-act=mirror-test]")
     page.wait_for_timeout(3200)  # the speed test results stream in
     shot(page, "mirrors", lang)
     page.click("[data-act=modal-close]")
