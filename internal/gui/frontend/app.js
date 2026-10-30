@@ -913,8 +913,15 @@ modalViews.update = (d) => {
   const line = (x) => `<li>${sha(x.hash)}<div class="grow"><div class="subj">${esc(x.subject || '')}</div><div class="sub">${esc([x.author, when(x.date)].filter(Boolean).join(' · '))}</div></div></li>`;
   const list = (xs) => `<ul class="commits">${xs.map(line).join('')}</ul>`;
   const head = c?.compare?.head;
-  const opts = (d.refs?.refs || []).map((x) => `<option value="${esc(x.name)}" ${d.ref === x.name ? 'selected' : ''}>${x.kind === 'tag' ? '🏷 ' : ''}${esc(x.name)} · ${short(x.commit)}${x.name === d.refs.defaultBranch ? ' · ' + esc(t('defaultBranchMark')) : ''}${x.commit === dep.commit ? ' ✓' : ''}</option>`).join('');
-  const target = d.pick && d.refs ? `<select class="input sm-select" data-bind="ref">${opts}</select>` : `<code>${esc(c?.ref || d.ref || '')}</code>`;
+  // The picker: branches, tags, and the chosen branch's earlier commits (value "@<hash>") to go back to.
+  const refs = d.refs?.refs || [], tip = refs.find((x) => x.name === d.ref)?.commit;
+  const opt = (value, on, text) => `<option value="${esc(value)}" ${on ? 'selected' : ''}>${esc(text)}</option>`;
+  const group = (label, xs) => (xs.length ? `<optgroup label="${esc(label)}">${xs.join('')}</optgroup>` : '');
+  const refOpt = (x) => opt(x.name, !d.at && d.ref === x.name, `${x.name} · ${short(x.commit)}${x.name === d.refs.defaultBranch ? ' · ' + t('defaultBranchMark') : ''}${x.commit === dep.commit ? ' ✓' : ''}`);
+  const older = (d.history || []).filter((x) => x.hash !== tip).map((x) => opt('@' + x.hash, d.at === x.hash,
+    `${short(x.hash)} · ${x.subject.length > 60 ? x.subject.slice(0, 59) + '…' : x.subject} · ${when(x.date)}${x.hash === dep.commit ? ' ✓' : ''}`));
+  const opts = group(t('branches'), refs.filter((x) => x.kind === 'branch').map(refOpt)) + group(t('tags'), refs.filter((x) => x.kind === 'tag').map(refOpt)) + group(t('olderOn', { ref: d.ref }), older);
+  const target = d.pick && d.refs ? `<select class="input sm-select" data-bind="pickVersion">${opts}</select>` : `<code>${esc(c?.ref || d.ref || '')}</code>`;
   const facts = `<dl class="upd-from-to">
     <dt>${t('current')}</dt><dd><code>${esc(dep.ref)}</code> ${sha(dep.commit)} <span class="t">${esc(dep.subject || '')}</span>${dep.commitDate ? ` <span class="sub">· ${esc(when(dep.commitDate))}</span>` : ''}</dd>
     <dt>${t('updateTarget')}</dt><dd>${target}${c?.commit ? ` ${sha(c.commit)} <span class="t">${esc(head?.subject || '')}</span>${head?.date ? ` <span class="sub">· ${esc(when(head.date))}</span>` : ''}` : ''}</dd></dl>`;
@@ -941,7 +948,7 @@ modalViews.update = (d) => {
   const ready = !!c?.commit && c.commit !== dep.commit;
   return {
     cls: 'wide',
-    html: header(d.pick ? 'branch' : 'arrowUp', esc(t(d.pick || d.focus ? 'updateTitle' : 'whatsNewTitle', { app: a.name })), esc(t('updateSub', { repo: repoLabel(dep.repo) }))) + `<div class="mbody">
+    html: header(d.pick ? 'branch' : 'arrowUp', esc(t(d.pick ? 'versionTitle' : d.focus ? 'updateTitle' : 'whatsNewTitle', { app: a.name })), esc(t('updateSub', { repo: repoLabel(dep.repo) }))) + `<div class="mbody">
       ${facts}${body}${ready ? notes : ''}</div>
       <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="do-update-ref" data-primary ${ready ? '' : 'disabled'} ${d.focus ? 'autofocus' : ''}>${icon('arrowUp', 'sm')} ${c?.compare?.ahead === 0 && c.compare.behind ? t('updateBack') : t('update')}</button></footer>`,
   };
@@ -1564,11 +1571,11 @@ async function doPrepare(a, revert) {
   openActivity();
   await boardOp(revert ? 'revert' : 'prepare', (f) => call('Prepare', S.cur, a.folder, revert, f), a.folder, () => (revert ? t('t_revert') : t('t_prepare'))).catch(() => {});
 }
-// doUpdate installs ref, and only the commit expect the user saw (see openUpdate).
-async function doUpdate(a, ref, expect) {
+// doUpdate installs commit, the one the user saw (see openUpdate), recorded under ref.
+async function doUpdate(a, ref, commit) {
   openActivity();
   try {
-    const res = await boardOp('update', (f) => call('Update', S.cur, a.folder, ref, expect, f), a.folder);
+    const res = await boardOp('update', (f) => call('Update', S.cur, a.folder, ref, commit, f), a.folder);
     if (res && res.previous === res.commit) toast('info', t('t_upToDate', { app: a.name }));
     else toast('ok', t('t_update', { app: a.name }));
     if (res?.needsSetup) setupToast(a.folder);
@@ -1579,10 +1586,11 @@ function setupToast(folder) {
   toast('warn', t('needsSetupToast', { app: a?.profile?.name || folder }), { label: t('applySetup'), fn: () => { const x = appByFolder(folder); if (x) doPrepare(x, false); } }, 12000);
 }
 // openUpdate shows what updating an app would change (the commits between the installed version and
-// the new one) and updates only when the user says so there. pick: choose another branch or tag;
-// focus: Update has the focus (from the card's Update button, so that stays one click more).
+// the new one) and updates only when the user says so there. pick: choose another branch or tag, or
+// an earlier commit to go back to; focus: Update has the focus (from the card's Update button, so
+// that stays one click more).
 async function openUpdate(a, { pick = false, focus = false } = {}) {
-  const d = { app: a, pick, focus, ref: a.deploy.ref, ch: null };
+  const d = { app: a, pick, focus, ref: a.deploy.ref, at: '', ch: null };
   const p = pushModal('update', d);
   loadChanges(d);
   if ((await p) && d.ch) doUpdate(a, d.ch.ref, d.ch.commit);
@@ -1590,8 +1598,8 @@ async function openUpdate(a, { pick = false, focus = false } = {}) {
 function loadChanges(d) {
   const seq = (d.seq = (d.seq || 0) + 1);
   d.ch = null; d.error = ''; invalidate('modal');
-  runOp(call('Changes', d.app.deploy.repo, d.ref, d.app.deploy.commit))
-    .then((c) => { if (seq === d.seq) { d.ch = c; d.ref = c.ref; d.refs = c.refs; } })
+  runOp(call('Changes', d.app.deploy.repo, d.ref, d.at, d.app.deploy.commit))
+    .then((c) => { if (seq === d.seq) { d.ch = c; d.ref = c.ref; d.refs = c.refs; d.history = c.history || []; } })
     .catch((e) => { if (seq === d.seq) d.error = e.message || String(e); })
     .finally(() => { if (seq === d.seq) { invalidate('modal'); setTimeout(focusModal, 30); } });
 }
@@ -2290,7 +2298,11 @@ document.addEventListener('input', (ev) => {
 document.addEventListener('change', (ev) => {
   const el = ev.target.closest('[data-bind="repo"]');
   if (el && topModal()?.type === 'install') loadRefs(topModal().data);
-  if (ev.target.dataset?.bind === 'ref' && topModal()?.type === 'update') loadChanges(topModal().data);
+  if (ev.target.dataset?.bind === 'pickVersion' && topModal()?.type === 'update') {
+    const d = topModal().data, v = d.pickVersion || '';
+    if (v.startsWith('@')) d.at = v.slice(1); else { d.ref = v; d.at = ''; }
+    loadChanges(d);
+  }
 });
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape') {

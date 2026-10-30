@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -135,6 +136,24 @@ func Compare(ctx context.Context, repoURL, base, head string) (*Comparison, erro
 		out.Head = cmp.MergeBaseCommit.change()
 	default:
 		out.Head = Change{Hash: head}
+	}
+	return out, nil
+}
+
+// History lists the latest commits of a branch, tag or commit (newest first), at most n, from
+// GitHub. Other hosts are not supported (an error).
+func History(ctx context.Context, repoURL, ref string, n int) ([]Change, error) {
+	api, err := repoAPI(repoURL)
+	if err != nil {
+		return nil, err
+	}
+	var cs []ghCommit
+	if err := githubGet(ctx, fmt.Sprintf("%s/commits?sha=%s&per_page=%d", api, url.QueryEscape(ref), n), &cs); err != nil {
+		return nil, err
+	}
+	out := make([]Change, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, c.change())
 	}
 	return out, nil
 }

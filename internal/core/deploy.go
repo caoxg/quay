@@ -19,6 +19,9 @@ import (
 type FetchOptions struct {
 	Repo   string // git URL / owner/repo; empty when Dir is set
 	Ref    string // branch, tag or commit; empty = default branch
+	// Commit is a commit of Ref to take instead of its tip (an earlier version, or the one the
+	// user looked at). The bundle still names Ref, so later updates follow that branch.
+	Commit string
 	Subdir string // app folder inside the repo
 	Dir    string // deploy a local folder instead
 }
@@ -31,6 +34,9 @@ func Fetch(ctx context.Context, sink Sink, cacheDir string, f FetchOptions) (*so
 	if f.Ref != "" {
 		what += " @ " + f.Ref
 	}
+	if f.Commit != "" {
+		what += " (" + shortHash(f.Commit) + ")"
+	}
 	if f.Dir != "" {
 		what = f.Dir
 	}
@@ -40,18 +46,21 @@ func Fetch(ctx context.Context, sink Sink, cacheDir string, f FetchOptions) (*so
 			b, err = source.FromDir(f.Dir)
 		} else {
 			lw := &lines{o: o, filter: func(l string) bool { return !strings.Contains(l, "\r") }}
-			b, err = source.Fetch(ctx, cacheDir, f.Repo, f.Ref, f.Subdir, lw)
+			ref := f.Ref
+			if f.Commit != "" {
+				ref = f.Commit
+			}
+			b, err = source.Fetch(ctx, cacheDir, f.Repo, ref, f.Subdir, lw)
+			if err == nil && f.Commit != "" && f.Ref != "" {
+				b.Ref = f.Ref
+			}
 		}
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	short := b.Commit
-	if len(short) > 7 {
-		short = short[:7]
-	}
-	o.info(fmt.Sprintf("%s · %s %s", b.App.Name, b.Ref, short), b)
+	o.info(fmt.Sprintf("%s · %s %s", b.App.Name, b.Ref, shortHash(b.Commit)), b)
 	return b, nil
 }
 
@@ -67,9 +76,9 @@ type DeployOptions struct {
 	Setup bool
 	// BackupDir is where automatic backups go.
 	BackupDir string
-	// Expect (Update only) is the commit the user agreed to install: if the branch has moved on
-	// since, the update stops rather than install commits nobody looked at.
-	Expect string
+	// Commit (Update only) is the commit to install: the one the user looked at, even if the
+	// branch has moved on since, or an earlier one to go back to. It is recorded under the branch.
+	Commit string
 }
 
 // DeployResult summarises a deploy.
@@ -270,12 +279,9 @@ func (s *Session) Update(ctx context.Context, sink Sink, cacheDir, key, ref stri
 			ref = ""
 		}
 	}
-	b, err := Fetch(ctx, sink, cacheDir, FetchOptions{Repo: a.Deploy.Repo, Ref: ref, Subdir: a.Deploy.Subdir})
+	b, err := Fetch(ctx, sink, cacheDir, FetchOptions{Repo: a.Deploy.Repo, Ref: ref, Commit: opt.Commit, Subdir: a.Deploy.Subdir})
 	if err != nil {
 		return nil, err
-	}
-	if opt.Expect != "" && b.Commit != opt.Expect {
-		return nil, fmt.Errorf("%s has moved on to %s since you looked (you agreed to %s); look at what it changes again", b.Ref, shortHash(b.Commit), shortHash(opt.Expect))
 	}
 	if b.Commit == a.Deploy.Commit && !opt.Force {
 		o := s.op(ctx, sink)

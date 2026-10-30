@@ -606,7 +606,7 @@ table.pol-slots td.n { text-align: right; white-space: nowrap; }
 .upd-from-to code, .commits code { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); padding: 0 5px; border-radius: 5px; flex: none; }
 .upd-from-to code.click, .commits code.click { cursor: pointer; }
 .upd-from-to code.click:hover, .commits code.click:hover { border-color: var(--accent); color: var(--accent); }
-.upd-from-to select.sm-select { width: auto; height: 26px; font-size: 12px; padding: 0 6px; flex: none; }
+.upd-from-to select.sm-select { width: auto; max-width: 260px; height: 26px; font-size: 12px; padding: 0 6px; flex: none; text-overflow: ellipsis; }
 .upd-head { font-size: 12px; font-weight: 600; color: var(--text-2); margin: 0 0 6px; }
 .commits { list-style: none; margin: 0 0 10px; padding: 4px 0; border: 1px solid var(--border); border-radius: 10px; max-height: 260px; overflow-y: auto; background: var(--surface-2); }
 .commits li { display: flex; gap: 10px; align-items: flex-start; padding: 6px 12px; font-size: 12.5px; }

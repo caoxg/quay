@@ -328,19 +328,28 @@ const mock = {
     after: () => { const a = mockState.apps[0]; a.deploy.commit = '466512e9426f61fb07d9be9b3f20df0171692150'; a.deploy.subject = 'Update XGO Duck runtime and servo protection setup'; a.deploy.deployedAt = new Date().toISOString(); a.status = 'running'; },
   }),
   Update: (b, f) => mock.Deploy({ board: b, folder: f }),
-  // What updating would change: three new commits on master, a branch that went another way.
-  Changes: (repo, ref, base) => simulate('changes', '', '', [], () => {
-    const refs = /xgoduck/.test(repo)
+  // What updating would change. The duck's master is a line of commits (the installed one in the
+  // middle, earlier ones to go back to); its other branch went another way.
+  Changes: (repo, ref, at, base) => simulate('changes', '', '', [], () => {
+    const duck = /xgoduck/.test(repo), day = (n) => new Date(Date.now() - n * 864e5).toISOString();
+    const refs = duck
       ? { url: repo, defaultBranch: 'master', refs: [{ name: 'master', kind: 'branch', commit: '8837d5a3bc7cf3746f6da2b55c7b9191026b9838' }, { name: 'next-audio-video-tof', kind: 'branch', commit: '44b2ac8d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b' }] }
       : { url: repo, defaultBranch: 'main', refs: [{ name: 'main', kind: 'branch', commit: 'b7e1f0a9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3' }, { name: 'v1.2.0', kind: 'tag', commit: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' }] };
     const r = refs.refs.find((x) => x.name === ref) || refs.refs.find((x) => x.name === refs.defaultBranch);
-    if (r.commit === base) return { refs, ref: r.name, commit: r.commit };
-    const c = (hash, subject, author, days) => ({ hash, subject, author, date: new Date(Date.now() - days * 864e5).toISOString() });
-    const ahead = !/xgoduck/.test(repo) ? [c(r.commit, 'Show tomorrow’s forecast too', 'example', 3)]
-      : r.name === refs.defaultBranch ? [c(r.commit, 'Add roller walking controls and simplify the user guide', 'LuwuDynamics', 1), c('5f511b9c0e2a4d4b8a6f0c1d2e3f405162738495', 'Smooth actions by default (action_smoothing 0.3)', 'LuwuDynamics', 2), c('3c2b1a09f8e7d6c5b4a3928170615243f4e5d6c7', 'Fix the servo scan timeout', 'LuwuDynamics', 4)]
-      : [c(r.commit, 'Try audio, video and a ToF sensor', 'LuwuDynamics', 6)];
-    const removed = r.name === refs.defaultBranch ? [] : [{ hash: base, subject: 'Add servo scanning functionality', author: 'LuwuDynamics', date: '2026-10-12T08:00:00Z' }];
-    return { refs, ref: r.name, commit: r.commit, compare: { head: ahead[0], ahead: ahead.length, behind: removed.length, commits: ahead }, removed };
+    const c = (hash, subject, days) => ({ hash, subject, author: duck ? 'LuwuDynamics' : 'example', date: day(days) });
+    const line = !duck ? (r.kind === 'tag' ? [] : [c(r.commit, 'Show tomorrow’s forecast too', 3), c('a1b2c3d4e5f60718293a4b5c6d7e8f9012345678', 'Release 1.2.0', 41)])
+      : r.name === 'master' ? [c(r.commit, 'Add roller walking controls and simplify the user guide', 1), c('5f511b9c0e2a4d4b8a6f0c1d2e3f405162738495', 'Smooth actions by default (action_smoothing 0.3)', 2),
+        c('3c2b1a09f8e7d6c5b4a3928170615243f4e5d6c7', 'Fix the servo scan timeout', 4), { ...c(base, 'Add servo scanning functionality', 0), date: '2026-10-12T08:00:00Z' },
+        c('7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b', 'Tune the walking policy gains', 24), c('1f2e3d4c5b6a79881726354453627180a9b8c7d6', 'First public runtime', 30)]
+      : [c(r.commit, 'Try audio, video and a ToF sensor', 6), { ...c(base, 'Add servo scanning functionality', 0), date: '2026-10-12T08:00:00Z' }];
+    const commit = at || r.commit, out = { refs, ref: r.name, commit, history: r.kind === 'branch' ? line : undefined };
+    if (commit === base) return out;
+    const ti = line.findIndex((x) => x.hash === commit), bi = line.findIndex((x) => x.hash === base);
+    let ahead, removed;
+    if (ti >= 0 && bi >= 0) { ahead = ti < bi ? line.slice(ti, bi) : []; removed = ti > bi ? line.slice(bi, ti) : []; }
+    else { ahead = line.length ? [line[0]] : [c(commit, 'Release', 9)]; removed = [{ hash: base, subject: 'Add servo scanning functionality', author: 'LuwuDynamics', date: '2026-10-12T08:00:00Z' }]; }
+    const head = ahead[0] || line[ti] || { hash: commit };
+    return { ...out, compare: { head, ahead: ahead.length, behind: removed.length, commits: ahead }, removed };
   }),
   Start: (b, f) => simulate('start', b, f, [['start', 'Start', ['App started'], 900]], null, { after: () => { mockState.apps.find((a) => a.folder === f).status = 'running'; } }),
   // The mock duck holds torque while running, so stopping it needs force (like the real safety probe).

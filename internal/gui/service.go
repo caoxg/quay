@@ -1378,19 +1378,30 @@ func (s *Service) Deploy(req DeployRequest) string {
 	})
 }
 
-// Update installs ref (empty: the branch the app came from), but only expect, the commit the user
-// saw in Changes; it stops if the branch has moved on since.
-func (s *Service) Update(boardName, folder, ref, expect string, force bool) string {
+// Update installs commit, the one the user saw in Changes (newer or older), recorded under ref
+// (empty: the branch the app came from) so later updates follow that branch.
+func (s *Service) Update(boardName, folder, ref, commit string, force bool) string {
 	return s.run("update", boardName, folder, func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
-		return sess.Update(ctx, sink, config.RepoCacheDir(), folder, ref, core.DeployOptions{Force: force, Backup: true, BackupDir: config.BackupsDir(), Expect: expect})
+		return sess.Update(ctx, sink, config.RepoCacheDir(), folder, ref, core.DeployOptions{Force: force, Backup: true, BackupDir: config.BackupsDir(), Commit: commit})
 	})
+}
+
+func isBranch(info *source.RemoteInfo, name string) bool {
+	for _, r := range info.Refs {
+		if r.Kind == "branch" && r.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateChanges is what updating an app to a branch or tag would change, shown before updating.
 type UpdateChanges struct {
 	Refs   *source.RemoteInfo `json:"refs"`   // the repository's branches and tags, to pick another
 	Ref    string             `json:"ref"`    // the branch or tag that would be installed
-	Commit string             `json:"commit"` // what it points to now ("" when it is gone: see Error)
+	Commit string             `json:"commit"` // its tip, or the earlier commit asked for ("" when the ref is gone: see Error)
+	// History is the branch's latest commits (newest first, GitHub only), to go back to one.
+	History []source.Change `json:"history,omitempty"`
 	// Compare is what moving from the installed commit to Commit changes; nil when the host
 	// cannot tell (only GitHub is asked), with Error saying why.
 	Compare *source.Comparison `json:"compare,omitempty"`
@@ -1400,8 +1411,9 @@ type UpdateChanges struct {
 }
 
 // Changes looks up what ref of repo points to right now (empty or a commit hash: the default
-// branch, as Update does) and the commits between base, the installed commit, and it.
-func (s *Service) Changes(repo, ref, base string) string {
+// branch, as Update does), or takes at, an earlier commit of it, and lists the commits between
+// base, the installed commit, and that.
+func (s *Service) Changes(repo, ref, at, base string) string {
 	return s.run("changes", "", "", func(ctx context.Context, _ *core.Session, _ core.Sink) (any, error) {
 		info, err := source.ListRefs(ctx, repo)
 		if err != nil {
@@ -1426,6 +1438,18 @@ func (s *Service) Changes(repo, ref, base string) string {
 			if out.Commit == "" {
 				return nil, fmt.Errorf("%s has no branches", info.URL)
 			}
+		}
+		if isBranch(info, out.Ref) {
+			// Keyed by the tip, so a branch that moves on is asked again.
+			if v, err := s.remember("history "+repo+" "+out.Commit, time.Hour, func() (any, error) { return source.History(ctx, repo, out.Commit, 30) }); err == nil {
+				out.History = v.([]source.Change)
+			}
+		}
+		if at != "" {
+			if !core.LooksLikeCommit(at) {
+				return nil, fmt.Errorf("%q is not a commit", at)
+			}
+			out.Commit = at
 		}
 		if base == "" || base == out.Commit {
 			return out, nil
