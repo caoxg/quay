@@ -110,7 +110,7 @@ const en = {
   changesLoading: 'Looking up what the new version changes…', changesFailed: 'Can’t look up the new version: {err}', changesNone: '{ref} has nothing newer than what is installed.',
   changesNoList: 'Quay can’t list the commits in between ({err}). Look at the repository before you update.', changesMore: '{n} more not listed here; GitHub shows them all.',
   changesBack: 'The installed version has {n} commits this one lacks; they go away with the update (below).', changesOnWeb: 'Compare the code on GitHub',
-  updateRestarts: 'Updating stops {app}, which is running, and starts it again with the new version.', updateBack: 'Go back to it',
+  updateRestarts: 'Updating stops {app}, which is running, and starts it again with the new version.', reinstallStops: '{app} is running: it is stopped before its code is replaced.', updateBack: 'Go back to it',
   // erase
   eraseTitle: 'Erase {app}?', eraseSub: 'This removes the app from {board}.',
   eraseL1: 'Stops it and removes its containers and caches', eraseL2: 'Deletes ~/ArduinoApps/{f}', eraseL3: 'No app will run at boot afterwards',
@@ -337,7 +337,7 @@ const zh = {
   changesLoading: '正在查新版本改了什么…', changesFailed: '查不到新版本：{err}', changesNone: '{ref} 上没有比已安装的更新的版本。',
   changesNoList: '列不出中间的提交（{err}）。更新前可以先去仓库里看看改了什么。', changesMore: '还有 {n} 个没列在这里，GitHub 上能看到全部。',
   changesBack: '已安装的版本里有 {n} 个提交是这个版本没有的，更新后它们就没了（见下）。', changesOnWeb: '在 GitHub 上对比代码',
-  updateRestarts: '{app} 正在运行，更新时会先停下它，装好新版本后再启动。', updateBack: '退回到这个版本',
+  updateRestarts: '{app} 正在运行，更新时会先停下它，装好新版本后再启动。', reinstallStops: '{app} 正在运行，会先停下它，再替换代码。', updateBack: '退回到这个版本',
   eraseTitle: '删除 {app}？', eraseSub: '这会把这个 App 从 {board} 上移除。',
   eraseL1: '停止它，并移除它的容器和缓存', eraseL2: '删除 ~/ArduinoApps/{f}', eraseL3: '之后开机不会自动运行任何 App',
   eraseBackup: '先备份 data/（{files}）', eraseRevert: '同时撤销它的系统设置（sudo）', eraseConfirm: '输入 {f} 确认', eraseBtn: '删除',

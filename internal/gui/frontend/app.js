@@ -887,6 +887,7 @@ modalViews.install = (d) => {
       </dl>
       ${p ? `<details class="hooks-box" ${d.hooksOpen !== false ? 'open' : ''}><summary data-act="hooks-toggle">${icon('shield', 'sm')} ${esc(t('hooksSummary', { name: p.name, n: hooks(p).length }))}</summary>${hooksHtml(p)}</details>` : ''}</div>
       ${existing ? `<div class="callout warn" style="margin:10px 0 0">${icon('info')}<div class="grow">${esc(t('existingWarn', { f: d.folder }))}</div></div>` : ''}
+      ${['running', 'starting'].includes(existing?.status) ? `<p class="upd-note">${icon('restart', 'sm')} ${esc(t('reinstallStops', { app: existing.name }))}</p>` : ''}
       <div style="margin-top:12px">${field(t('installFolder'), input('folder', d.folder, '', 'class="input mono"'), esc(t('folderHelp', { f: d.folder })))}</div>
       ${check('start', d.start, t('startAfter'))}
       ${existing?.data?.length ? check('backup', d.backup, t('backupFirst')) : ''}
