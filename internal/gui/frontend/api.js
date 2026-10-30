@@ -36,6 +36,7 @@ const mockState = {
   def: 'duck',
   lang: '',
   connected: {},
+  lost: {}, // board → 'off' (stays unreachable) or 'blip' (answers again), see __mockLose
   mirror: { pypi: '', debian: '' },
   hostname: 'duck',
   relay: false,
@@ -128,6 +129,12 @@ async function simulate(kind, board, folder, steps, result, opts = {}) {
   }, 10);
   return op;
 }
+
+// In the preview console: __mockLose('duck') as if the board were switched off, __mockLose('duck',
+// 'blip') for a connection that drops and comes back.
+if (!rt) window.__mockLose = (board, how = 'off') => { mockState.lost[board] = how; localEmit('quay:lost', { board, reason: 'no answer from the board for 12s' }); };
+// __mockBack('duck'): the board is switched on again, so Seen finds it and the next connection works.
+if (!rt) window.__mockBack = (board) => { if (mockState.lost[board]) mockState.lost[board] = 'blip'; };
 
 const prompts = new Map();
 function mockPrompt(p) {
@@ -280,10 +287,23 @@ const mock = {
   PickKey: () => '/Users/me/.ssh/id_ed25519',
   OpenURL: (u) => window.open(u, '_blank'),
   Reveal: () => {},
+  Seen: async (board) => { await sleep(300); return mockState.lost[board] === 'off' ? '' : 'network'; },
   Status: (board) => {
     const op = nid();
     setTimeout(async () => {
       emitOp(op, { type: 'begin', kind: 'status', board });
+      if (mockState.lost[board]) { // after __mockLose: reconnect, or fail when the board stays off
+        emitOp(op, { type: 'step', step: 'connect', state: 'run', text: 'Connect to arduino@duck.local', kind: 'status', board });
+        await sleep(2500);
+        if (mockState.lost[board] === 'off') {
+          const err = 'cannot reach duck.local:22 (twice, 3s apart): 192.168.1.42:22: i/o timeout';
+          emitOp(op, { type: 'step', step: 'connect', state: 'fail', text: err, kind: 'status', board });
+          emitOp(op, { type: 'end', state: 'fail', kind: 'status', board, error: err });
+          return;
+        }
+        delete mockState.lost[board];
+        emitOp(op, { type: 'step', step: 'connect', state: 'ok', text: 'Connected to arduino@duck.local', kind: 'status', board });
+      }
       await sleep(board === 'desk' ? 700 : 600);
       const b = mockState.boards.find((x) => x.name === board);
       try { emitOp(op, { type: 'end', state: 'ok', kind: 'status', board, result: { ...statusData(board), via: b && (b.via === 'adb' || !b.host) ? 'adb' : 'ssh' } }); } catch (e) { emitOp(op, { type: 'end', state: 'fail', kind: 'status', board, error: e.message }); }

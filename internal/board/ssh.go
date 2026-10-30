@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -31,6 +32,10 @@ type SSH struct {
 	password string        // remembered login password, offered to sudo later
 	hostKey  ssh.PublicKey // the board's host key, as verified on connection
 	mu       sync.Mutex
+
+	lost    chan struct{} // closed when the connection is gone
+	closing atomic.Bool   // Close was called: the connection was not lost
+	silence time.Duration // set when the heartbeat gave up on a board that stopped answering
 }
 
 // LoginPassword returns the password used to log in, if any (to try with sudo).
@@ -121,10 +126,12 @@ func dialSSH(ctx context.Context, t Target, p Prompter, knownHostsFile string, r
 		Timeout:           12 * time.Second,
 	}
 	// The host key is always checked against the name in addr, even when dialling a fallback IP.
-	conn, err := dialBoard(ctx, t, addr, rounds)
+	nc, err := dialBoard(ctx, t, addr, rounds)
 	if err != nil {
 		return nil, err
 	}
+	conn := &heardConn{Conn: nc}
+	conn.heard()
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
 		conn.Close()
@@ -135,12 +142,13 @@ func dialSSH(ctx context.Context, t Target, p Prompter, knownHostsFile string, r
 		return nil, fmt.Errorf("ssh %s: %w", addr, err)
 	}
 	s.client = ssh.NewClient(c, chans, reqs)
-	go keepAlive(s.client)
+	s.watch(conn)
 	return s, nil
 }
 
-// redialDelay is the pause before the second round of attempts.
-var redialDelay = 3 * time.Second
+// redialDelay is the pause before the second round of attempts; dialTimeout is how long one
+// address may take to answer (a board on the local network answers in milliseconds).
+var redialDelay, dialTimeout = 3 * time.Second, 6 * time.Second
 
 // dialBoard opens the TCP connection to the board. When none of its addresses answers it tries
 // them all again after redialDelay, up to rounds times in all: a board on Wi‑Fi now and then
@@ -170,7 +178,7 @@ func dialBoard(ctx context.Context, t Target, addr string, rounds int) (net.Conn
 // dialRound tries the board's address, then (for a name) its IPv4 addresses, and reports every
 // address that failed.
 func dialRound(ctx context.Context, t Target, addr string) (net.Conn, []DialFailure) {
-	d := net.Dialer{Timeout: 12 * time.Second}
+	d := net.Dialer{Timeout: dialTimeout}
 	first := dialAddress(ctx, t, addr)
 	conn, err := d.DialContext(ctx, "tcp", first)
 	if err == nil {
@@ -324,14 +332,84 @@ func (s *SSH) TrustAs(host string, port int, knownHostsFile string) error {
 	return err
 }
 
-func keepAlive(c *ssh.Client) {
-	t := time.NewTicker(20 * time.Second)
+// The heartbeat: a board that loses power or leaves the Wi‑Fi sends nothing, not even a reset, and
+// TCP alone takes minutes to give up on it. So the board must be heard from (any data, or the
+// answer to a keepalive sent once it has been quiet for keepaliveAfter) at least every
+// silenceLimit, or the connection is closed and Lost reports it.
+var (
+	heartbeatTick  = 2 * time.Second
+	keepaliveAfter = 4 * time.Second
+	silenceLimit   = 12 * time.Second
+)
+
+// watch starts the heartbeat on the connection c under s.client, and closes Lost when it ends.
+func (s *SSH) watch(c *heardConn) {
+	s.lost = make(chan struct{})
+	go func() {
+		s.client.Wait()
+		close(s.lost)
+	}()
+	go s.heartbeat(c, heartbeatTick, keepaliveAfter, silenceLimit)
+}
+
+func (s *SSH) heartbeat(c *heardConn, tick, askAfter, limit time.Duration) {
+	t := time.NewTicker(tick)
 	defer t.Stop()
-	for range t.C {
-		if _, _, err := c.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+	var asking atomic.Bool
+	for {
+		select {
+		case <-s.lost:
 			return
+		case <-t.C:
+		}
+		switch quiet := c.quiet(); {
+		case quiet >= limit:
+			s.mu.Lock()
+			s.silence = quiet
+			s.mu.Unlock()
+			s.client.Close()
+			return
+		case quiet >= askAfter && asking.CompareAndSwap(false, true):
+			go func() {
+				s.client.SendRequest("keepalive@openssh.com", true, nil) // any answer will do
+				asking.Store(false)
+			}()
 		}
 	}
+}
+
+// heardConn is the connection to the board, and when the board last sent something on it.
+type heardConn struct {
+	net.Conn
+	last atomic.Int64 // time.Now().UnixNano() of the last read
+}
+
+func (c *heardConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.heard()
+	}
+	return n, err
+}
+
+func (c *heardConn) heard()               { c.last.Store(time.Now().UnixNano()) }
+func (c *heardConn) quiet() time.Duration { return time.Since(time.Unix(0, c.last.Load())) }
+
+// Lost is closed when the connection is gone: the board closed it (shutting down, say), stopped
+// answering, or Close was called.
+func (s *SSH) Lost() <-chan struct{} { return s.lost }
+
+// LostReason says why the connection is gone, once Lost is closed; "" after Close.
+func (s *SSH) LostReason() string {
+	if s.closing.Load() {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.silence > 0 {
+		return fmt.Sprintf("no answer from the board for %s", s.silence.Round(time.Second))
+	}
+	return "the board closed the connection"
 }
 
 // knownFiles are ~/.ssh/known_hosts and Quay's own file, when they exist.
@@ -447,6 +525,7 @@ func (s *SSH) Close() error {
 	if s.client == nil {
 		return nil
 	}
+	s.closing.Store(true)
 	return s.client.Close()
 }
 

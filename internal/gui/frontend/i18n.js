@@ -2,7 +2,7 @@
 const en = {
   tagline: 'Arduino Apps for UNO Q',
   boards: 'Boards', addBoard: 'Add board', backupsFolder: 'Backups folder', language: 'Language',
-  connected: 'Connected', connecting: 'Connecting…', offline: 'Not connected', refresh: 'Refresh',
+  connected: 'Connected', connecting: 'Connecting…', offline: 'Not connected', lost: 'Disconnected', reconnecting: 'Disconnected, reconnecting…', refresh: 'Refresh',
   installApp: 'Install app', activity: 'Activity', apps: 'Apps',
   model: 'Board', network: 'Network', appcli: 'Arduino App CLI', mirror: 'China mirrors',
   mirrorOn: 'On', mirrorOff: 'Off', mirrorCustom: 'Custom index', notFound: 'not found',
@@ -13,7 +13,7 @@ const en = {
   welcomeStep3: 'Update in place', welcomeStep3d: 'data/ is kept and backed up first.',
   noAppsTitle: 'No apps on this board yet', noAppsText: 'Install one from Custom or from any git repository. Quay keeps track of where it came from so you can update it later.',
   installFromGit: 'Install from git…', installFromCatalog: 'Install from Custom…',
-  cantConnect: 'Can’t connect to {name}', cantReach: 'None of its addresses answered, not even on a second try 3 seconds later. Is the board on, and on the same network as this computer?', retry: 'Retry', editBoard: 'Edit board', removeBoard: 'Remove board',
+  cantConnect: 'Can’t connect to {name}', cantReach: 'None of its addresses answered, not even on a second try 3 seconds later. Is the board on, and on the same network as this computer?', retry: 'Retry', waitBoth: 'Quay connects by itself as soon as {name} shows up on this network or is plugged in over USB.', waitNet: 'Quay connects by itself as soon as {name} shows up on this network.', waitUSB: 'Quay connects by itself as soon as {name} is plugged in over USB.', editBoard: 'Edit board', removeBoard: 'Remove board',
   connectingTo: 'Connecting to {name}…', firstConnectHint: 'Quay will ask for the board’s password the first time.',
   notUnoQ: 'This board does not identify as an Arduino UNO Q.',
   noAppCLI: 'arduino-app-cli was not found. Quay needs the stock Arduino UNO Q image.',
@@ -231,7 +231,7 @@ const en = {
 
 const zh = {
   tagline: 'UNO Q 的 Arduino App 管理', boards: '板子', addBoard: '添加板子', backupsFolder: '备份文件夹', language: '语言',
-  connected: '已连接', connecting: '正在连接…', offline: '未连接', refresh: '刷新',
+  connected: '已连接', connecting: '正在连接…', offline: '未连接', lost: '已断开', reconnecting: '已断开，正在重连…', refresh: '刷新',
   installApp: '安装 App', activity: '活动', apps: 'App',
   model: '板子', network: '网络', appcli: 'Arduino App CLI', mirror: '国内加速',
   mirrorOn: '已开启', mirrorOff: '未开启', mirrorCustom: '自定义源', notFound: '未找到',
@@ -242,7 +242,7 @@ const zh = {
   welcomeStep3: '原地更新', welcomeStep3d: '保留 data/，更新前先备份。',
   noAppsTitle: '这块板子上还没有 App', noAppsText: '从「定制」或任意 git 仓库安装一个。Quay 会记住它的来源，之后可以一键更新。',
   installFromGit: '从 git 安装…', installFromCatalog: '从「定制」安装…',
-  cantConnect: '连不上 {name}', cantReach: '它的地址都没有应答，隔 3 秒又试了一次也没有。板子开着吗？和这台电脑在同一个网络里吗？', retry: '重试', editBoard: '编辑板子', removeBoard: '移除板子',
+  cantConnect: '连不上 {name}', cantReach: '它的地址都没有应答，隔 3 秒又试了一次也没有。板子开着吗？和这台电脑在同一个网络里吗？', retry: '重试', waitBoth: '{name} 一出现在这个网络里，或者插上 USB 线，Quay 就会自己连上。', waitNet: '{name} 一出现在这个网络里，Quay 就会自己连上。', waitUSB: '{name} 一插上 USB 线，Quay 就会自己连上。', editBoard: '编辑板子', removeBoard: '移除板子',
   connectingTo: '正在连接 {name}…', firstConnectHint: '第一次连接时会询问板子的密码。',
   notUnoQ: '这块板子没有识别为 Arduino UNO Q。',
   noAppCLI: '没有找到 arduino-app-cli。Quay 需要 Arduino UNO Q 的原装系统。',

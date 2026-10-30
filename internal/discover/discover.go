@@ -69,6 +69,27 @@ func Browse(ctx context.Context, timeout time.Duration) ([]Board, error) {
 	return c.boards(), nil
 }
 
+// Find looks for one board, the first that match accepts, for up to timeout, and returns as soon
+// as it answers; ok is false when no such board did.
+func Find(ctx context.Context, timeout time.Duration, match func(Board) bool) (b Board, ok bool, err error) {
+	query, err := Query(Service)
+	if err != nil {
+		return Board{}, false, err
+	}
+	c := newCollector()
+	err = exchange(ctx, query, timeout, func(pkt []byte, from net.IP) bool {
+		c.add(pkt, from)
+		for _, x := range c.boards() {
+			if match(x) {
+				b, ok = x, true
+				return true
+			}
+		}
+		return false
+	})
+	return b, ok, err
+}
+
 // LookupHost resolves a NAME.local host name with an mDNS query, for systems whose resolver does
 // not (Windows without Bonjour, minimal Linux, builds without cgo).
 func LookupHost(ctx context.Context, host string, timeout time.Duration) ([]string, error) {

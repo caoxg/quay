@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -486,6 +487,44 @@ func (s *Service) dropSession(name string) {
 	}
 }
 
+// keep makes sess the board's session and watches it: when the board goes away (switched off, out
+// of the Wi‑Fi, the cable out), the session is dropped and the window told at once (quay:lost,
+// with the board's name), instead of at the next status check.
+func (s *Service) keep(name string, sess *core.Session) {
+	s.mu.Lock()
+	s.sessions[strings.ToLower(name)] = sess
+	s.mu.Unlock()
+	lost := sess.Lost()
+	if lost == nil {
+		return
+	}
+	go func() {
+		<-lost
+		key := ""
+		s.mu.Lock()
+		for k, v := range s.sessions { // under its current name: the board may have been renamed
+			if v == sess {
+				key = k
+				delete(s.sessions, k)
+			}
+		}
+		s.mu.Unlock()
+		if key == "" {
+			return // dropped or replaced on purpose
+		}
+		reason := sess.T.(board.Watched).LostReason() // before Close, after which it is ""
+		sess.Close()
+		applog.Default.Printf("[connection %s] lost: %s", key, reason)
+		name := key
+		if cfg, err := config.Load(); err == nil {
+			if t, ok := cfg.Board(key); ok {
+				name = t.Name
+			}
+		}
+		s.emit("quay:lost", map[string]string{"board": name, "reason": reason})
+	}()
+}
+
 func (s *Service) session(ctx context.Context, name string, sink core.Sink) (*core.Session, error) {
 	key := strings.ToLower(name)
 	s.mu.Lock()
@@ -510,9 +549,7 @@ func (s *Service) session(ctx context.Context, name string, sink core.Sink) (*co
 		return nil, err
 	}
 	sink(core.Event{Type: "step", Step: "connect", State: "ok", Text: "Connected to " + sess.T.Describe(), Time: time.Now().UnixMilli()})
-	s.mu.Lock()
-	s.sessions[key] = sess
-	s.mu.Unlock()
+	s.keep(key, sess)
 	if s.maybeRelay(ctx, sess) {
 		s.mu.Lock()
 		s.relayRetry[key] = time.Now()
@@ -659,7 +696,7 @@ func (s *Service) run(kind, boardName, folder string, fn func(ctx context.Contex
 		var res any
 		if err == nil {
 			res, err = fn(ctx, sess, sink)
-			if connectionLost(err) && boardName != "" && ctx.Err() == nil {
+			if boardName != "" && ctx.Err() == nil && (connectionLost(err) || sess.Gone()) {
 				s.dropSession(boardName) // stale connection: reconnect once and retry
 				if sess, err = s.session(ctx, boardName, sink); err == nil {
 					res, err = fn(ctx, sess, sink)
@@ -756,6 +793,47 @@ func (s *Service) Scan() string {
 	})
 }
 
+// Seen says how a saved board Quay could not reach has shown up again: "network" when it
+// announces itself on the local network (mDNS, as a board does a few seconds into booting),
+// "usb" when it is plugged in, "" when neither. The window asks every few seconds while it shows
+// that the board cannot be reached, and connects when it has shown up.
+func (s *Service) Seen(name string) (string, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return "", err
+	}
+	t, ok := cfg.Board(name)
+	if !ok {
+		return "", fmt.Errorf("no saved board %q", name)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if usb, ok := t.USB(); ok && t.Via != board.KindSSH {
+		if devs, err := board.ADBDevices(ctx); err == nil { // no adb: no USB
+			for _, d := range devs {
+				if d.State == "device" && (usb.Serial == "" || d.Serial == usb.Serial) {
+					return board.KindADB, nil
+				}
+			}
+		}
+	}
+	if t.Host != "" && t.Via != board.KindADB {
+		if _, ok, _ := discover.Find(ctx, 1500*time.Millisecond, func(b discover.Board) bool { return sameBoard(t, b) }); ok {
+			return "network", nil
+		}
+	}
+	return "", nil
+}
+
+// sameBoard says whether a board found on the network is the saved board t: by serial number,
+// else by its host name or address.
+func sameBoard(t board.Target, b discover.Board) bool {
+	if t.BoardID != "" && b.Serial != "" {
+		return strings.EqualFold(t.BoardID, b.Serial)
+	}
+	return strings.EqualFold(strings.TrimSuffix(t.Host, "."), b.Host) || slices.Contains(b.IPs, t.Host)
+}
+
 // AddBoard connects to a board and saves it under its own name (its hostname). Adding a board that
 // is already saved (same serial number) adds this way to its entry (config.Adopt). uploadKey also
 // uploads this computer's SSH public key, so later connections need no password.
@@ -804,9 +882,7 @@ func (s *Service) AddBoard(t board.Target, makeDefault, uploadKey bool) string {
 			}
 		}
 		s.dropSession(name)
-		s.mu.Lock()
-		s.sessions[strings.ToLower(name)] = sess
-		s.mu.Unlock()
+		s.keep(name, sess)
 		s.maybeRelay(ctx, sess)
 		return BoardStatus{Status: st, Board: name, Via: sess.Via(), Replaced: replaced, ReplacedVia: via, Joined: joined}, nil
 	})

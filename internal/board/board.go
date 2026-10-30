@@ -28,6 +28,14 @@ type Transport interface {
 	Close() error
 }
 
+// Watched is a Transport that notices when the board goes away.
+type Watched interface {
+	// Lost is closed when the connection to the board is gone, or was closed.
+	Lost() <-chan struct{}
+	// LostReason says why, once Lost is closed: "" when the connection was closed on purpose.
+	LostReason() string
+}
+
 // Kind of transport.
 const (
 	KindSSH = "ssh"

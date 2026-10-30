@@ -78,6 +78,24 @@ func (s *Session) Via() string {
 	return board.KindSSH
 }
 
+// Lost is closed when the connection to the board is gone (nil when the transport cannot tell).
+func (s *Session) Lost() <-chan struct{} {
+	if w, ok := s.T.(board.Watched); ok {
+		return w.Lost()
+	}
+	return nil
+}
+
+// Gone says whether the connection to the board is gone (lost or closed).
+func (s *Session) Gone() bool {
+	select {
+	case <-s.Lost():
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Session) Close() error {
 	s.StopRelay()
 	return s.T.Close()

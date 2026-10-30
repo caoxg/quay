@@ -219,6 +219,8 @@ async function refresh(name = S.cur) {
     if (res.board && res.board !== name) { renameLocal(name, res.board); name = res.board; } // renamed on the board
     st.data = res;
     st.error = null;
+    st.lost = false;
+    st.waits = 0;
     checkUpdates(name, st.data.apps || []);
     // What a check found holds for one boot of one board and one set of package sources: a restart,
     // or a re-flash, can change it all, and a mirror switch leaves apt without lists until refreshed.
@@ -235,7 +237,7 @@ async function refresh(name = S.cur) {
       if (S.cur && S.cur !== name) refresh(S.cur);
       return;
     }
-    if (!e.cancelled) { st.error = e.message; st.data = null; }
+    if (!e.cancelled) { st.error = e.message; st.data = null; st.lost = false; }
   } finally {
     st.loading = false; st.connecting = false;
     invalidate('main', 'sidebar');
@@ -282,7 +284,7 @@ async function checkUpdates(name, apps) {
 function renderSidebar() {
   const items = S.boards.map((b) => {
     const st = S.status[b.name] || {};
-    const dot = st.connecting || st.loading ? 'busy' : st.error ? 'err' : st.data ? 'ok' : '';
+    const dot = st.lost ? 'err' : st.connecting || st.loading ? 'busy' : st.error ? 'err' : st.data ? 'ok' : '';
     return `<div class="board-item ${b.name === S.cur ? 'active' : ''}" data-act="select-board" data-board="${esc(b.name)}">
       <div class="chip">${icon(curVia(b) === 'adb' ? 'usb' : 'wifi')}</div>
       <div class="meta"><div class="title">${esc(b.name)}${b.name === S.def ? `<span class="star" title="default">★</span>` : ''}${Object.values(S.updates[b.name] || {}).some((u) => u.behind) ? `<span class="reddot" title="${esc(t('updateAvailable'))}"></span>` : ''}</div><div class="sub">${esc(boardTarget(b))}</div></div>
@@ -320,15 +322,15 @@ function renderMain() {
   if (st.data) body = warnings(st.data) + overview(st.data) + appsSection(st.data);
   else if (st.error && !st.loading) body = errorCard(b, st.error);
   else body = connectingCard(b);
-  el.innerHTML = topbar(b, st) + `<div class="content" id="content"><div class="content-inner">${body}</div></div>`;
+  el.innerHTML = topbar(b, st) + `<div class="content" id="content"><div class="content-inner${st.lost && st.data ? ' stale' : ''}">${body}</div></div>`;
   const c = $('#content');
   c.scrollTop = scroll;
   c.addEventListener('scroll', () => $('.topbar')?.classList.toggle('scrolled', c.scrollTop > 4), { passive: true });
 }
 
 function topbar(b, st) {
-  const state = st.connecting ? t('connecting') : st.data ? t('connected') : st.loading ? t('connecting') : t('offline');
-  const dot = st.connecting || st.loading ? 'busy' : st.error ? 'err' : st.data ? 'ok' : '';
+  const state = st.lost ? t(st.connecting || st.loading ? 'reconnecting' : 'lost') : st.connecting ? t('connecting') : st.data ? t('connected') : st.loading ? t('connecting') : t('offline');
+  const dot = st.lost ? 'err' : st.connecting || st.loading ? 'busy' : st.error ? 'err' : st.data ? 'ok' : '';
   const n = runningCount();
   return `<header class="topbar">
     <h1>${esc(b?.name || '')}</h1>
@@ -358,11 +360,17 @@ function connectingCard(b) {
     <div class="state-card"><div>${icon('spinner', 'lg spin')}</div><h3>${t('connectingTo', { name: esc(b?.name) })}</h3><p>${t('firstConnectHint')}</p></div>`;
 }
 
+// awaitable: the board was not there (no address answered, not on USB), so Quay waits for it to
+// show up and connects then (see watchForBoard), rather than on a timer.
+const awaitable = (err) => /^cannot reach |USB board .* not found|no UNO Q found over USB/.test(err || '');
+
 function errorCard(b, err) {
   // No address answered (board.UnreachableError): say so in words, one tried address per line.
   const reach = /^cannot reach /.test(err || '');
+  const net = hasNet(b) && b.via !== 'adb', usb = hasUSB(b) && b.via !== 'ssh';
+  const wait = awaitable(err) && (net || usb) ? `<p class="wait">${icon('spinner', 'sm spin')} ${t(net && usb ? 'waitBoth' : net ? 'waitNet' : 'waitUSB', { name: esc(b.name) })}</p>` : '';
   return `<div class="state-card"><div style="color:var(--danger)">${icon('alert', 'lg')}</div>
-    <h3>${t('cantConnect', { name: esc(b?.name) })}</h3>${reach ? `<p>${t('cantReach')}</p>` : ''}<div class="err">${esc(reach ? err.replace(/; /g, '\n') : err)}</div>
+    <h3>${t('cantConnect', { name: esc(b?.name) })}</h3>${reach ? `<p>${t('cantReach')}</p>` : ''}<div class="err">${esc(reach ? err.replace(/; /g, '\n') : err)}</div>${wait}
     <div class="actions"><button class="btn primary" data-act="refresh">${icon('refresh')} ${t('retry')}</button><button class="btn" data-act="edit-board">${icon('edit')} ${t('editBoard')}</button></div></div>`;
 }
 
@@ -1956,7 +1964,7 @@ async function editPolicyIndexes(d) {
 
 // ---------------------------------------------------------------- actions (data-act)
 const act = {
-  'select-board': ({ board: name }) => { if (S.cur === name) return; S.cur = name; renderAll(); if (!S.status[name]?.data) refresh(name); },
+  'select-board': ({ board: name }) => { if (S.cur === name) return; S.cur = name; renderAll(); if (!S.status[name]?.data || S.status[name].lost) refresh(name); },
   'add-board': () => openBoardDialog(null),
   'edit-board': () => openBoardDialog(board(S.cur)),
   'board-menu': (_, el) => {
@@ -2162,6 +2170,15 @@ function respond(ok) {
   call('Respond', m.data.id, ok ? m.data.value || '' : '', ok);
   closeModal(ok);
 }
+// The connection to a board is gone (the service's heartbeat, or the cable out): say so at once and
+// reconnect, rather than show "Connected" until the next status check.
+on('quay:lost', ({ board: name }) => {
+  const st = S.status[name];
+  if (!st?.data) return;
+  st.lost = true;
+  invalidate('main', 'sidebar');
+  if (name === S.cur && !topModal()) refresh(name);
+});
 on('quay:prompt', (p) => { pushModal(p.kind === 'hostkey' ? 'hostkey' : 'secret', { ...p, value: '' }); });
 on('quay:prompt-cancel', (pid) => {
   const i = S.modals.findIndex((m) => m.data.id === pid);
@@ -2247,6 +2264,25 @@ document.addEventListener('keydown', (ev) => {
 });
 window.addEventListener('resize', closeMenu);
 setInterval(() => { if (S.cur && S.status[S.cur]?.data && !document.hidden && !topModal()) refresh(S.cur); }, 30000);
+
+// watchForBoard: while the window shows that the current board is not there, ask every 5 seconds
+// whether it has shown up (announced on the network a few seconds into booting, or plugged in)
+// and connect when it has. A board that shows up but still cannot be connected to (SSH not up
+// yet, say) is tried again less and less often, up to once a minute.
+let watching = false;
+async function watchForBoard() {
+  const name = S.cur, st = S.status[name];
+  if (watching || !st || st.data || st.loading || !awaitable(st.error) || document.hidden || topModal() || Date.now() < (st.nextTry || 0)) return;
+  watching = true;
+  try {
+    if (!(await call('Seen', name).catch(() => '')) || S.cur !== name || st.loading || st.data) return;
+    await refresh(name);
+    if (!st.data) st.nextTry = Date.now() + Math.min(60, 15 * (st.waits = (st.waits || 0) + 1)) * 1000;
+  } finally {
+    watching = false;
+  }
+}
+setInterval(watchForBoard, 5000);
 
 // ---------------------------------------------------------------- boot
 // The macOS menu bar's Quay menu (internal/gui/menu.go).

@@ -14,12 +14,20 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // ADB is a Transport over USB using the adb binary from Android platform-tools (on PATH, or QUAY_ADB).
 type ADB struct {
 	bin    string
 	serial string
+
+	watch     sync.Once
+	lost      chan struct{} // see Lost
+	closed    chan struct{}
+	closeOnce sync.Once
+	gone      bool // the board left USB (rather than Close)
 }
 
 // ADBPath finds adb: QUAY_ADB, else the one on PATH, else (when that is missing or too old) the
@@ -180,7 +188,7 @@ func OpenADB(ctx context.Context, t Target) (*ADB, error) {
 	case len(ready) > 1:
 		return nil, fmt.Errorf("several USB devices (%s): choose one with adb:SERIAL", strings.Join(ready, ", "))
 	}
-	return &ADB{bin: bin, serial: ready[0]}, nil
+	return &ADB{bin: bin, serial: ready[0], closed: make(chan struct{})}, nil
 }
 
 func (a *ADB) Describe() string { return "usb:" + a.serial }
@@ -199,7 +207,57 @@ func (a *ADB) Reverse(ctx context.Context, boardPort, localPort int) error {
 func (a *ADB) RemoveReverse(ctx context.Context, boardPort int) error {
 	return a.run(a.cmd(ctx, "reverse", "--remove", fmt.Sprintf("tcp:%d", boardPort)), nil, nil, nil)
 }
-func (a *ADB) Close() error { return nil }
+func (a *ADB) Close() error {
+	a.closeOnce.Do(func() { close(a.closed) })
+	return nil
+}
+
+// usbCheckEvery is how often a watched board is looked for on USB.
+var usbCheckEvery = 3 * time.Second
+
+// Lost is closed when the board is no longer on USB (the cable came out, the board was switched
+// off), or after Close. Quay looks for it every usbCheckEvery from the first call on.
+func (a *ADB) Lost() <-chan struct{} {
+	a.watch.Do(func() {
+		a.lost = make(chan struct{})
+		go a.look(usbCheckEvery)
+	})
+	return a.lost
+}
+
+// LostReason says why the board is gone, once Lost is closed; "" after Close.
+func (a *ADB) LostReason() string {
+	if !a.gone {
+		return ""
+	}
+	return "the board is no longer on USB"
+}
+
+func (a *ADB) look(every time.Duration) {
+	defer close(a.lost)
+	t := time.NewTicker(every)
+	defer t.Stop()
+	missed := 0
+	for {
+		select {
+		case <-a.closed:
+			return
+		case <-t.C:
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		out, err := a.cmd(ctx, "get-state").Output()
+		cancel()
+		if err == nil && strings.TrimSpace(string(out)) == "device" {
+			missed = 0
+			continue
+		}
+		// Twice in a row: adbd restarting (a system update does that) takes a second or two.
+		if missed++; missed == 2 {
+			a.gone = true
+			return
+		}
+	}
+}
 
 func (a *ADB) cmd(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, a.bin, append([]string{"-s", a.serial}, args...)...)

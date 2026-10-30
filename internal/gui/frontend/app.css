@@ -172,7 +172,8 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 .topbar .where .way:hover { color: var(--text); border-color: var(--text-2); }
 .topbar .spacer { flex: 1; }
 .content { flex: 1; overflow-y: auto; padding: 4px 24px 28px; }
-.content-inner { max-width: 1180px; margin: 0 auto; }
+.content-inner { max-width: 1180px; margin: 0 auto; transition: opacity .2s; }
+.content-inner.stale { opacity: .55; }
 
 /* ---------- buttons ---------- */
 .btn {
@@ -281,6 +282,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 .state-card p { color: var(--text-2); margin: 0 0 16px; }
 .state-card .err { font-family: var(--mono); font-size: 12px; background: var(--danger-soft); color: var(--danger); border-radius: 8px; padding: 10px; text-align: left; margin: 0 0 16px; white-space: pre-wrap; word-break: break-word; }
 .state-card .actions { display: flex; gap: 8px; justify-content: center; }
+.state-card p.wait { display: flex; gap: 6px; align-items: center; justify-content: center; font-size: 12.5px; }
 .skeleton { background: linear-gradient(90deg, var(--surface-2), var(--border), var(--surface-2)); background-size: 200% 100%; animation: shimmer 1.3s infinite; border-radius: 6px; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 .welcome .art { width: 96px; height: 96px; border-radius: 26px; color: #fff; background: linear-gradient(145deg, #13a3ad, #0b6f86 60%, #0a4f6b); border: 0; box-shadow: 0 10px 30px rgba(11, 111, 134, 0.35); }
