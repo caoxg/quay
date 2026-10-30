@@ -70,6 +70,14 @@ func Connect(ctx context.Context, t board.Target, p board.Prompter, knownHosts s
 	return &Session{T: tr, Target: t, Prompt: p}, nil
 }
 
+// Via is the way this session reaches the board: board.KindADB over USB, else board.KindSSH.
+func (s *Session) Via() string {
+	if _, ok := s.T.(*board.ADB); ok {
+		return board.KindADB
+	}
+	return board.KindSSH
+}
+
 func (s *Session) Close() error {
 	s.StopRelay()
 	return s.T.Close()
@@ -294,7 +302,7 @@ func (o *op) sudoWith(title, body string, vars map[string]string, filter func(st
 }
 
 func userOf(s *Session) string {
-	if s.Target.Kind == board.KindSSH && s.Target.User != "" {
+	if s.Via() == board.KindSSH && s.Target.Host != "" && s.Target.User != "" {
 		return s.Target.User + "@" + s.Target.Host
 	}
 	return "the board's user"

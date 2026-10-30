@@ -167,6 +167,9 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 .topbar.scrolled { border-bottom-color: var(--border); background: color-mix(in srgb, var(--bg) 88%, transparent); }
 .topbar h1 { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; }
 .topbar .where { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 8px; }
+.topbar .where .way { display: inline-flex; align-items: center; gap: 4px; min-width: 0; border: 1px solid var(--border); background: var(--surface); color: var(--text-2); border-radius: 999px; padding: 1px 6px 1px 7px; font: inherit; cursor: pointer; }
+.topbar .where .way span { overflow: hidden; text-overflow: ellipsis; }
+.topbar .where .way:hover { color: var(--text); border-color: var(--text-2); }
 .topbar .spacer { flex: 1; }
 .content { flex: 1; overflow-y: auto; padding: 4px 24px 28px; }
 .content-inner { max-width: 1180px; margin: 0 auto; }
@@ -236,6 +239,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 .pill .dot { width: 6px; height: 6px; box-shadow: none; }
 .pill.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
 .pill.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.pill.muted { color: var(--muted); }
 .pill.err { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
 .pill.accent { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
 .pill.click { cursor: pointer; }
@@ -287,6 +291,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; posit
 
 /* ---------- menu ---------- */
 .menu { position: fixed; z-index: 85; min-width: 230px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg); padding: 5px; animation: fade-in 0.1s ease-out; }
+.menu button .grow { flex: 1; }
 .menu button { display: flex; align-items: center; gap: 9px; width: 100%; border: 0; background: none; padding: 7px 9px; border-radius: 6px; cursor: pointer; text-align: left; color: var(--text); }
 .menu button:hover { background: var(--accent); color: #fff; }
 .menu button:disabled { opacity: 0.4; pointer-events: none; }

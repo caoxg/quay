@@ -354,7 +354,8 @@ func boardCmd() *cobra.Command {
 		Use:   "add ADDRESS",
 		Short: "Save a board, named after its hostname (ADDRESS: host, user@host[:port], adb or adb:SERIAL)",
 		Long: "Connects to the board and saves it under the board's own name (its hostname, as App Lab and\n" +
-			"NAME.local show it). Adding a board that is already saved updates its address.",
+			"NAME.local show it). Adding a board that is already saved updates its address; added over USB, it\n" +
+			"keeps its network address, and the other way round (see quay board via).",
 		Example: "  quay board scan\n  quay board add duck.local\n  quay board add arduino@192.168.1.42\n  quay board add adb",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, a []string) error {
@@ -378,13 +379,8 @@ func boardCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if old, ok := cfg.ByBoardID(st.Serial); ok {
-				t.Name = old.Name // the same board again: update its entry
-			} else {
-				t.Name = cfg.UniqueName(st.Hostname, st.Serial)
-			}
-			cfg.Put(t)
-			name, _ := cfg.Learn(t.Name, st.Hostname, st.Serial, st.PrimaryIP())
+			name, _, joined := cfg.Adopt(t, st.Hostname, st.Serial)
+			name, _ = cfg.Learn(name, st.Hostname, st.Serial, st.PrimaryIP())
 			if makeDefault {
 				cfg.Default = name
 			}
@@ -411,8 +407,11 @@ func boardCmd() *cobra.Command {
 			if model == "" {
 				model = "unknown board"
 			}
-			fmt.Printf("saved %s → %s  %s%s\n", bold(name), saved, dim(model+", serial "+st.Serial),
+			fmt.Printf("saved %s → %s  %s%s\n", bold(name), saved.Ways(), dim(model+", serial "+st.Serial),
 				map[bool]string{true: dim("  (default)")}[strings.EqualFold(cfg.Default, name)])
+			if joined {
+				fmt.Println(dim("Quay now reaches " + name + " both ways: the network first, USB when the network does not answer (quay board via)"))
+			}
 			return nil
 		},
 	}
@@ -434,7 +433,7 @@ func boardCmd() *cobra.Command {
 			if strings.EqualFold(b.Name, cfg.Default) {
 				mark = "*"
 			}
-			fmt.Fprintf(w, "%s %s\t%s\n", mark, b.Name, b)
+			fmt.Fprintf(w, "%s %s\t%s\n", mark, b.Name, b.Ways())
 		}
 		return w.Flush()
 	}}
@@ -505,7 +504,38 @@ func boardCmd() *cobra.Command {
 		fmt.Println(dim("add one with: quay board add " + found[0].Address()))
 		return nil
 	}}
-	c.AddCommand(add, scan, ls, rm, def, devices)
+	via := &cobra.Command{
+		Use:   "via NAME auto|network|usb",
+		Short: "Choose how Quay reaches a board it knows both ways",
+		Long: "auto (the default) tries the network first, then USB when the network does not answer and the\n" +
+			"board is plugged in; network or usb uses that way only.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, a []string) error {
+			v, ok := map[string]string{"auto": "", "network": board.KindSSH, "wifi": board.KindSSH, "ssh": board.KindSSH, "usb": board.KindADB, "adb": board.KindADB}[strings.ToLower(a[1])]
+			if !ok {
+				return fmt.Errorf("choose auto, network or usb, not %q", a[1])
+			}
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			t, ok := cfg.Board(a[0])
+			if !ok {
+				return fmt.Errorf("no saved board %q", a[0])
+			}
+			t.Via = v
+			if err := t.CheckWays(); err != nil {
+				return err
+			}
+			cfg.Put(t)
+			if err := cfg.Save(); err != nil {
+				return err
+			}
+			fmt.Printf("%s → %s\n", bold(t.Name), t.Ways())
+			return nil
+		},
+	}
+	c.AddCommand(add, scan, ls, rm, def, devices, via)
 	return c
 }
 
@@ -1456,19 +1486,6 @@ func shellCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if t.Kind == board.KindADB {
-			bin, err := board.ADBPath()
-			if err != nil {
-				return err
-			}
-			args := []string{}
-			if t.Serial != "" {
-				args = append(args, "-s", t.Serial)
-			}
-			c := exec.Command(bin, append(args, "shell")...)
-			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-			return c.Run()
-		}
 		ctx, cancel := signalContext()
 		defer cancel()
 		s, err := core.Connect(ctx, t, tty{}, config.KnownHostsFile())
@@ -1476,9 +1493,14 @@ func shellCmd() *cobra.Command {
 			return err
 		}
 		defer s.Close()
+		if a, ok := s.T.(*board.ADB); ok {
+			c := a.Command("shell")
+			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+			return c.Run()
+		}
 		sshT, ok := s.T.(*board.SSH)
 		if !ok {
-			return errors.New("shell needs SSH")
+			return errors.New("shell needs SSH or USB")
 		}
 		return interactive(sshT.Client())
 	}}

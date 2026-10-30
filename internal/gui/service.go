@@ -3,6 +3,7 @@
 package gui
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -200,14 +201,12 @@ func normalizeTarget(t *board.Target) error {
 	return nil
 }
 
-// SaveBoard changes how a saved board is reached (address, user, key). Its name is the board's
+// SaveBoard changes how a saved board is reached: its network address (host, user, port, key; an
+// empty host leaves only USB), its USB serial when t has one, and Via. Its name is the board's
 // hostname and does not change here (see Rename); new boards come in through AddBoard.
 func (s *Service) SaveBoard(t board.Target, oldName string, makeDefault bool) error {
 	if oldName == "" {
 		return errors.New("new boards are added with AddBoard")
-	}
-	if err := normalizeTarget(&t); err != nil {
-		return err
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -217,17 +216,59 @@ func (s *Service) SaveBoard(t board.Target, oldName string, makeDefault bool) er
 	if !ok {
 		return fmt.Errorf("no saved board %q", oldName)
 	}
-	t.Name, t.BoardID, t.SkipDesktop = old.Name, old.BoardID, old.SkipDesktop
-	if t.Host == old.Host {
-		t.LastIP = old.LastIP
+	m := old
+	m.Host, m.Via = strings.TrimSpace(t.Host), t.Via
+	m.User, m.Port, m.KeyFile = "", 0, ""
+	if m.Host != "" {
+		m.User, m.Port, m.KeyFile = cmp.Or(strings.TrimSpace(t.User), "arduino"), cmp.Or(t.Port, 22), strings.TrimSpace(t.KeyFile)
 	}
-	cfg.Put(t)
+	if t.Serial != "" {
+		m.Serial = t.Serial
+	}
+	switch {
+	case t.LastIP != "":
+		m.LastIP = t.LastIP
+	case !strings.EqualFold(m.Host, old.Host):
+		m.LastIP = ""
+	}
+	if err := m.CheckWays(); err != nil {
+		return err
+	}
+	cfg.Put(m)
 	if makeDefault || len(cfg.Boards) == 1 {
-		cfg.Default = t.Name
+		cfg.Default = m.Name
 	}
 	s.dropSession(oldName)
-	s.dropSession(t.Name)
 	return cfg.Save()
+}
+
+// SetVia chooses the way to a board Quay can reach both ways: "" (the network first, then USB),
+// board.KindSSH or board.KindADB. The next operation connects that way.
+func (s *Service) SetVia(name, via string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	t, ok := cfg.Board(name)
+	if !ok {
+		return fmt.Errorf("no saved board %q", name)
+	}
+	t.Via = via
+	if err := t.CheckWays(); err != nil {
+		return err
+	}
+	cfg.Put(t)
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	s.dropSession(name)
+	return nil
+}
+
+// Reconnect closes the board's connection, so the next operation connects afresh (by default
+// the network first again, after a fallback to USB).
+func (s *Service) Reconnect(name string) {
+	s.dropSession(name)
 }
 
 // SetSkipDesktop remembers whether the board's system updates leave out the on-board desktop.
@@ -564,7 +605,8 @@ func connectionLost(err error) bool {
 		return false
 	}
 	m := err.Error()
-	for _, k := range []string{"EOF", "closed network connection", "broken pipe", "connection reset", "ssh session", "no route to host", "i/o timeout"} {
+	for _, k := range []string{"EOF", "closed network connection", "broken pipe", "connection reset", "ssh session", "no route to host", "i/o timeout",
+		"adb: device", "no devices/emulators found"} { // adb: the cable came out
 		if strings.Contains(m, k) {
 			return true
 		}
@@ -667,10 +709,13 @@ func record(tag string, e OpEvent) {
 type BoardStatus struct {
 	*core.Status
 	Board string `json:"board"`
-	// Replaced is the saved entry AddBoard took over (same serial number, reached another way
-	// before, e.g. a re-flashed board now on USB), and ReplacedVia how it was reached.
+	Via   string `json:"via"` // the way this connection took: ssh (network) or adb (USB)
+	// Replaced is the saved entry AddBoard took over (same serial number, reached at another
+	// address before), and ReplacedVia how it was reached.
 	Replaced    string `json:"replaced,omitempty"`
 	ReplacedVia string `json:"replacedVia,omitempty"`
+	// Joined: AddBoard reached a saved board the other way, and Quay now knows both.
+	Joined bool `json:"joined,omitempty"`
 }
 
 func (s *Service) Status(boardName string) string {
@@ -679,7 +724,7 @@ func (s *Service) Status(boardName string) string {
 		if err != nil {
 			return nil, err
 		}
-		return BoardStatus{Status: st, Board: s.learn(boardName, sess, st)}, nil
+		return BoardStatus{Status: st, Board: s.learn(boardName, sess, st), Via: sess.Via()}, nil
 	})
 }
 
@@ -712,8 +757,8 @@ func (s *Service) Scan() string {
 }
 
 // AddBoard connects to a board and saves it under its own name (its hostname). Adding a board that
-// is already saved (same serial number) updates its entry. uploadKey also uploads this computer's
-// SSH public key, so later connections need no password.
+// is already saved (same serial number) adds this way to its entry (config.Adopt). uploadKey also
+// uploads this computer's SSH public key, so later connections need no password.
 func (s *Service) AddBoard(t board.Target, makeDefault, uploadKey bool) string {
 	return s.run("addboard", "", "", func(ctx context.Context, _ *core.Session, sink core.Sink) (any, error) {
 		if err := normalizeTarget(&t); err != nil {
@@ -736,17 +781,12 @@ func (s *Service) AddBoard(t board.Target, makeDefault, uploadKey bool) string {
 			sess.Close()
 			return nil, err
 		}
-		var replaced, via string
-		if old, ok := cfg.ByBoardID(st.Serial); ok {
-			t.Name, t.SkipDesktop = old.Name, old.SkipDesktop
-			if old.String() != t.String() {
-				replaced, via = old.Name, old.String()
-			}
-		} else {
-			t.Name = cfg.UniqueName(st.Hostname, st.Serial)
+		name, via, joined := cfg.Adopt(t, st.Hostname, st.Serial)
+		replaced := ""
+		if via != "" {
+			replaced = name
 		}
-		cfg.Put(t)
-		name, _ := cfg.Learn(t.Name, st.Hostname, st.Serial, st.PrimaryIP())
+		name, _ = cfg.Learn(name, st.Hostname, st.Serial, st.PrimaryIP())
 		if makeDefault || cfg.Default == "" {
 			cfg.Default = name
 		}
@@ -768,7 +808,7 @@ func (s *Service) AddBoard(t board.Target, makeDefault, uploadKey bool) string {
 		s.sessions[strings.ToLower(name)] = sess
 		s.mu.Unlock()
 		s.maybeRelay(ctx, sess)
-		return BoardStatus{Status: st, Board: name, Replaced: replaced, ReplacedVia: via}, nil
+		return BoardStatus{Status: st, Board: name, Via: sess.Via(), Replaced: replaced, ReplacedVia: via, Joined: joined}, nil
 	})
 }
 
@@ -828,7 +868,7 @@ func (s *Service) Rename(boardName, newName string) string {
 		if err != nil {
 			return nil, err
 		}
-		return BoardStatus{Status: st, Board: s.learn(boardName, sess, st)}, nil
+		return BoardStatus{Status: st, Board: s.learn(boardName, sess, st), Via: sess.Via()}, nil
 	})
 }
 

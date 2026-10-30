@@ -117,6 +117,10 @@ func (c *Config) Board(name string) (board.Target, bool) {
 
 // Put adds or replaces a board (by name).
 func (c *Config) Put(t board.Target) {
+	t.Kind = board.KindADB // for Quay 0.2 and older, which know one way per board
+	if t.Host != "" {
+		t.Kind = board.KindSSH
+	}
 	for i, b := range c.Boards {
 		if strings.EqualFold(b.Name, t.Name) {
 			c.Boards[i] = t
@@ -127,6 +131,44 @@ func (c *Config) Put(t board.Target) {
 	if c.Default == "" {
 		c.Default = t.Name
 	}
+}
+
+// Adopt saves t, a board just reached whose serial number is serial, and returns its name. A board
+// saved already (same serial number) keeps its name and settings and learns the way t reached it:
+// added over USB it keeps its network address, and the other way round. replaced is how it was
+// reached before when t changes that same way (another address); joined says that the board can
+// now be reached both ways.
+func (c *Config) Adopt(t board.Target, hostname, serial string) (name, replaced string, joined bool) {
+	old, ok := c.ByBoardID(serial)
+	if !ok {
+		t.Name = c.UniqueName(hostname, serial)
+		c.Put(t)
+		return t.Name, "", false
+	}
+	m := old
+	if t.Host != "" {
+		if old.Host != "" && (!strings.EqualFold(old.Host, t.Host) || old.User != t.User || old.Port != t.Port) {
+			replaced = old.String()
+		}
+		joined = old.Host == ""
+		if !strings.EqualFold(old.Host, t.Host) {
+			m.LastIP = t.LastIP
+		}
+		m.Host, m.User, m.Port, m.KeyFile = t.Host, t.User, t.Port, t.KeyFile
+		if m.Via == board.KindADB {
+			m.Via = ""
+		}
+	} else {
+		joined = old.Host != "" && old.Via != board.KindADB
+		if t.Serial != "" {
+			m.Serial = t.Serial
+		}
+		if m.Via == board.KindSSH {
+			m.Via = ""
+		}
+	}
+	c.Put(m)
+	return m.Name, replaced, joined && m.Via == ""
 }
 
 // ByBoardID finds a saved board by the board's serial number.
@@ -191,13 +233,13 @@ func (c *Config) Learn(name, hostname, serial, ip string) (string, bool) {
 	if serial != "" && t.BoardID != serial {
 		t.BoardID, changed = serial, true
 	}
-	if ip != "" && t.Kind == board.KindSSH && net.ParseIP(t.Host) == nil && t.LastIP != ip {
+	if ip != "" && t.Host != "" && net.ParseIP(t.Host) == nil && t.LastIP != ip {
 		t.LastIP, changed = ip, true
 	}
 	if hostname = strings.TrimSpace(hostname); hostname != "" && !strings.EqualFold(t.Name, hostname) {
 		if n := c.UniqueName(hostname, t.BoardID); !strings.EqualFold(n, t.Name) {
 			old := t.Name
-			if t.Kind == board.KindSSH && strings.EqualFold(strings.TrimSuffix(t.Host, "."), old+".local") {
+			if strings.EqualFold(strings.TrimSuffix(t.Host, "."), old+".local") {
 				t.Host = hostname + ".local"
 			}
 			t.Name = n

@@ -194,7 +194,17 @@ async function loadBoards() {
   if (!S.cur) S.cur = S.def || S.boards[0]?.name || null;
 }
 const board = (name) => S.boards.find((b) => b.name === name);
-const boardTarget = (b) => (b.kind === 'adb' ? (b.serial ? `USB · ${b.serial}` : 'USB') : `${b.user || 'arduino'}@${b.host}${b.port && b.port !== 22 ? ':' + b.port : ''}`);
+// The ways to a saved board: its network address (host) and USB, by the serial saved or its serial
+// number (a UNO Q's adb serial). via: '' network first, then USB; 'ssh' or 'adb' that way only.
+const usbSerial = (b) => b?.serial || b?.boardId || '';
+const hasNet = (b) => !!b?.host;
+const hasUSB = (b) => !!usbSerial(b) || (b?.kind === 'adb' && !b?.host);
+const bothWays = (b) => hasNet(b) && hasUSB(b);
+// curVia: the way the board is reached now, or before it is connected, the way tried first.
+const curVia = (b) => S.status[b?.name]?.data?.via || (b?.via === 'adb' || !hasNet(b) ? 'adb' : 'ssh');
+const netTarget = (b) => `${b.user || 'arduino'}@${b.host}${b.port && b.port !== 22 ? ':' + b.port : ''}`;
+const usbTarget = (b) => (usbSerial(b) ? `USB · ${usbSerial(b)}` : 'USB');
+const boardTarget = (b) => (curVia(b) === 'adb' ? usbTarget(b) : netTarget(b));
 
 async function refresh(name = S.cur) {
   if (!name) return;
@@ -274,7 +284,7 @@ function renderSidebar() {
     const st = S.status[b.name] || {};
     const dot = st.connecting || st.loading ? 'busy' : st.error ? 'err' : st.data ? 'ok' : '';
     return `<div class="board-item ${b.name === S.cur ? 'active' : ''}" data-act="select-board" data-board="${esc(b.name)}">
-      <div class="chip">${icon(b.kind === 'adb' ? 'usb' : 'wifi')}</div>
+      <div class="chip">${icon(curVia(b) === 'adb' ? 'usb' : 'wifi')}</div>
       <div class="meta"><div class="title">${esc(b.name)}${b.name === S.def ? `<span class="star" title="default">★</span>` : ''}${Object.values(S.updates[b.name] || {}).some((u) => u.behind) ? `<span class="reddot" title="${esc(t('updateAvailable'))}"></span>` : ''}</div><div class="sub">${esc(boardTarget(b))}</div></div>
       <span class="dot ${dot}"></span></div>`;
   }).join('');
@@ -322,7 +332,7 @@ function topbar(b, st) {
   const n = runningCount();
   return `<header class="topbar">
     <h1>${esc(b?.name || '')}</h1>
-    <div class="where"><span class="dot ${dot}"></span><span>${esc(state)}</span><span>·</span><span>${esc(b ? boardTarget(b) : '')}</span>${st.data?.hostname && st.data.hostname !== b?.name ? `<span>·</span><span>${esc(st.data.hostname)}</span>` : ''}</div>
+    <div class="where"><span class="dot ${dot}"></span><span>${esc(state)}</span><span>·</span>${b ? `<button class="way" data-act="way-menu" title="${esc(t('wayLabel'))}">${icon(curVia(b) === 'adb' ? 'usb' : 'wifi', 'sm')}<span>${esc(boardTarget(b))}</span>${icon('chevronDown', 'sm')}</button>` : ''}${st.data?.hostname && st.data.hostname !== b?.name ? `<span>·</span><span>${esc(st.data.hostname)}</span>` : ''}</div>
     <div class="spacer"></div>
     <button class="btn ghost" data-act="toggle-activity">${icon('activity')} ${t('activity')}${n ? `<span class="badge">${n}</span>` : ''}</button>
     <button class="btn icon" data-act="refresh" title="${t('refresh')}">${icon('refresh', st.loading ? 'spin' : '')}</button>
@@ -349,8 +359,10 @@ function connectingCard(b) {
 }
 
 function errorCard(b, err) {
+  // No address answered (board.UnreachableError): say so in words, one tried address per line.
+  const reach = /^cannot reach /.test(err || '');
   return `<div class="state-card"><div style="color:var(--danger)">${icon('alert', 'lg')}</div>
-    <h3>${t('cantConnect', { name: esc(b?.name) })}</h3><div class="err">${esc(err)}</div>
+    <h3>${t('cantConnect', { name: esc(b?.name) })}</h3>${reach ? `<p>${t('cantReach')}</p>` : ''}<div class="err">${esc(reach ? err.replace(/; /g, '\n') : err)}</div>
     <div class="actions"><button class="btn primary" data-act="refresh">${icon('refresh')} ${t('retry')}</button><button class="btn" data-act="edit-board">${icon('edit')} ${t('editBoard')}</button></div></div>`;
 }
 
@@ -584,7 +596,7 @@ function renderMenu() {
   root.innerHTML = `<div class="menu" style="left:${Math.max(8, m.x)}px;${m.flipY ? `bottom:${window.innerHeight - m.top + 6}px` : `top:${m.y}px`}">${m.items.map((it, i) => {
     if (it === '-') return '<hr>';
     if (it.hint) return `<div class="hint">${esc(it.hint)}</div>`;
-    return `<button data-menu="${i}" class="${it.danger ? 'danger' : ''}" ${it.disabled ? 'disabled' : ''}>${icon(it.icon)} ${esc(it.label)}</button>`;
+    return `<button data-menu="${i}" class="${it.danger ? 'danger' : ''}" ${it.disabled ? 'disabled' : ''}>${icon(it.icon)} <span class="grow">${esc(it.label)}</span>${it.on ? icon('check', 'sm') : ''}</button>`;
   }).join('')}</div>`;
 }
 
@@ -781,8 +793,15 @@ modalViews.board = (d) => {
     ${d.kind !== 'adb' ? field(t('host'), input('host', d.host, t('hostPh'))) + more : `<div class="field"><label style="display:flex;justify-content:space-between;align-items:center">${t('usbDevices')}<button class="btn sm ghost" data-act="scan-usb">${icon('refresh', 'sm')} ${t('scan')}</button></label></div>${devices}`}`;
   let body;
   if (edit) {
+    // Both ways at once: the network address, USB (known by the serial number), and which to use.
+    const known = d.serial || d.boardId || '', dev = (d.devices || []).find((x) => x.serial === known);
+    const usb = known ? `<div class="device-list"><div class="device">${icon('usb')}<div class="grow"><b>${esc(t('serial', { s: known }))}</b></div>${d.devices == null ? icon('spinner', 'sm spin') : `<span class="pill ${dev ? '' : 'muted'}">${t(dev ? 'usbPlugged' : 'usbUnplugged')}</span>`}</div></div>`
+      : `<div class="field"><label style="display:flex;justify-content:space-between;align-items:center">${t('usbDevices')}<button class="btn sm ghost" data-act="scan-usb">${icon('refresh', 'sm')} ${t('scan')}</button></label></div>${devices}`;
+    const via = (v, ico, label) => `<button class="${(d.via || '') === v ? 'on' : ''}" data-act="board-via" data-via="${v}">${icon(ico)} ${label}</button>`;
     body = `<div class="callout info" style="margin:0 0 12px">${icon('info')}<div class="grow">${esc(t('nameFromBoard', { name: d.oldName }))}</div><button class="btn sm" data-act="rename-board">${t('renameBoardLink')}</button></div>
-      ${byHand}`;
+      <div class="field"><label>${t('wayLabel')}</label><div class="seg">${via('', 'refresh', t('wayAuto'))}${via('ssh', 'wifi', t('wayNet'))}${via('adb', 'usb', t('wayUSB'))}</div><div class="help">${t(d.via === 'ssh' ? 'wayNetHelp' : d.via === 'adb' ? 'wayUSBHelp' : 'wayAutoHelp')}</div></div>
+      <div class="field"><label>${icon('wifi', 'sm')} ${t('viaSSH')}</label></div>${field(t('host'), input('host', d.host, t('hostPh')), known ? t('hostOptional') : '') + more}
+      <div class="field" style="margin-top:14px"><label>${icon('usb', 'sm')} ${t('viaUSB')}</label></div>${usb}`;
   } else {
     const cur = selKey(d.sel), loading = d.devices == null || d.found == null;
     const row = (k, act, ico, name, where, sub, saved, pill) => `<div class="device ${cur === k ? 'on' : ''}" ${act}>${icon(ico)}<div class="grow"><b>${esc(name)}</b> <span class="sub">${esc(where)}</span>${pill || ''}<div class="sub">${esc(sub)}</div></div>${saved ? `<span class="pill">${esc(t('added', { name: saved }))}</span>` : cur === k ? icon('check') : ''}</div>`;
@@ -810,7 +829,7 @@ modalViews.board = (d) => {
   const progress = d.adding ? `<div class="loading-line" style="margin-top:8px">${icon('spinner', 'spin')} ${esc(t('addingBoard', { host: ssh ? selHost(d) : 'USB' }))}</div>`
     : d.addError ? `<div class="callout warn" style="margin:8px 0 0">${icon('alert')}<div class="grow">${esc(d.addError)}</div></div>` : '';
   return {
-    html: header(edit ? (ssh ? 'wifi' : 'usb') : 'plus', edit ? t('editBoardTitle') : t('addBoardTitle'), edit ? esc(d.oldName) : t('addBoardSub')) + `<div class="mbody">
+    html: header(edit ? (hasNet(d) ? 'wifi' : 'usb') : 'plus', edit ? t('editBoardTitle') : t('addBoardTitle'), edit ? esc(d.oldName) : t('addBoardSub')) + `<div class="mbody">
       ${body}${progress}</div>
       <footer>${edit ? `<button class="btn ghost danger-text" data-act="remove-board">${icon('trash', 'sm')} ${t('removeBoard')}</button>` : ''}<div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="save-board" data-primary ${d.adding ? 'disabled' : ''}>${edit ? t('save') : selFresh(d) ? t('nextBtn') : t('addBtn')}</button></footer>`,
   };
@@ -1619,7 +1638,7 @@ async function openBoardDialog(existing) {
     : { kind: 'ssh', sel: null, host: '', user: 'arduino', port: 22, keyFile: '', makeDefault: !S.boards.length, devices: null, found: null, more: false, uploadKey: true };
   const p = pushModal('board', d);
   if (!existing) scanBoards(d);
-  else if (d.kind === 'adb') scanUSB(d);
+  else scanUSB(d);
   if (!(await p)) return;
   if (existing) {
     S.cur = existing.name;
@@ -1631,6 +1650,7 @@ async function openBoardDialog(existing) {
   }
   const res = d.result, name = res.board;
   if (res.replaced) toast('info', t('t_boardReplaced', { old: res.replaced, via: res.replacedVia }), null, 9000);
+  else if (res.joined) toast('info', t('t_boardJoined', { name }), null, 9000);
   await loadBoards();
   S.cur = name;
   S.status[name] = { data: res };
@@ -1796,7 +1816,7 @@ async function loadRelayInfo() { S.relayInfo = await call('RelaySettings').catch
 async function scanUSB(d) {
   d.devices = null; d.devicesError = ''; invalidate('modal');
   try { d.devices = await call('USBDevices'); } catch (e) { d.devices = []; d.devicesError = e.message || String(e); }
-  if (d.oldName && d.devices.length === 1 && !d.serial) d.serial = d.devices[0].serial;
+  if (d.oldName && d.devices.length === 1 && !d.serial && !d.boardId) d.serial = d.devices[0].serial;
   invalidate('modal');
 }
 
@@ -1945,7 +1965,7 @@ const act = {
       { icon: 'edit', label: t('editBoard'), fn: () => openBoardDialog(b) },
       { icon: 'sliders', label: t('renameBoard'), disabled: !S.status[S.cur]?.data, fn: () => openRename() },
       { icon: 'key', label: t('setPassword'), disabled: !S.status[S.cur]?.data, fn: () => openPasswd() },
-      ...(b.kind === 'adb' ? [{ icon: 'sliders', label: t('fsMenu'), disabled: !S.status[S.cur]?.data, fn: () => openFirstSetup() }] : []),
+      ...(curVia(b) === 'adb' ? [{ icon: 'sliders', label: t('fsMenu'), disabled: !S.status[S.cur]?.data, fn: () => openFirstSetup() }] : []),
       { icon: 'package', label: t('systemUpdate'), disabled: !S.status[S.cur]?.data, fn: () => openSystem() },
       { icon: 'key', label: keyOn(S.status[S.cur]?.data) ? t('keyUploaded') : t('uploadKey'), disabled: !S.status[S.cur]?.data || keyOn(S.status[S.cur]?.data), fn: () => doUploadKey() },
       { icon: 'star', label: t('makeDefault'), disabled: S.def === b.name, fn: async () => { await call('SetDefault', b.name); await loadBoards(); invalidate('sidebar'); } },
@@ -1954,6 +1974,32 @@ const act = {
       { icon: 'trash', label: t('removeBoard'), danger: true, fn: () => removeBoard(b) },
     ]);
   },
+  // The way to the board: automatic, network only or USB only, or a network address to add.
+  'way-menu': (_, el) => {
+    const b = board(S.cur);
+    if (!b) return;
+    const busy = S.ops.some((o) => o.state === 'run' && o.board === b.name && o.kind !== 'status');
+    const again = async () => { delete S.status[b.name]; renderAll(); refresh(b.name); };
+    const set = (via) => async () => {
+      try { await call('SetVia', b.name, via); await loadBoards(); again(); } catch (e) { toast('err', e.message || String(e)); }
+    };
+    const items = [];
+    if (bothWays(b)) {
+      items.push({ icon: 'refresh', label: t('viaAuto'), on: !b.via, disabled: busy, fn: set('') },
+        { icon: 'wifi', label: t('viaNetOnly'), on: b.via === 'ssh', disabled: busy, fn: set('ssh') },
+        { icon: 'usb', label: t('viaUSBOnly'), on: b.via === 'adb', disabled: busy, fn: set('adb') });
+      if (!b.via && S.status[b.name]?.data?.via === 'adb') items.push('-', { icon: 'wifi', label: t('viaRetryNet'), disabled: busy, fn: async () => { await call('Reconnect', b.name); again(); } });
+      if (busy) items.push({ hint: t('viaBusy') });
+      items.push('-', { icon: 'edit', label: t('viaEdit'), fn: () => openBoardDialog(b) });
+    } else if (!hasNet(b)) {
+      const h = S.status[b.name]?.data?.hostname;
+      items.push({ hint: t('viaNoNet') }, { icon: 'wifi', label: t('viaAddNet'), fn: () => openBoardDialog({ ...b, host: h ? h + '.local' : '' }) });
+    } else {
+      items.push({ hint: t('viaNoUSB') }, { icon: 'edit', label: t('viaEdit'), fn: () => openBoardDialog(b) });
+    }
+    openMenu(el, items);
+  },
+  'board-via': ({ via }) => { const d = topModal().data; d.via = via; invalidate('modal'); },
   'remove-board': async () => { const d = topModal().data; if (await removeBoard(board(d.oldName))) closeModal(false); },
   refresh: () => refresh(S.cur),
   install: ({ cat, tab }) => openInstall({ cat, tab }),
@@ -2051,7 +2097,8 @@ const act = {
     const kind = d.oldName ? d.kind : d.sel?.kind || 'ssh';
     const t0 = { kind, host: kind === 'adb' ? '' : selHost(d), user: (d.user || 'arduino').trim(), port: parseInt(d.port, 10) || 22, keyFile: (d.keyFile || '').trim(), serial: kind === 'adb' ? (d.oldName ? d.serial : d.sel.serial) || '' : '' };
     if (d.oldName) {
-      try { await call('SaveBoard', { ...t0, name: d.oldName }, d.oldName, !!d.makeDefault); closeModal(true); } catch (e) { toast('err', e.message || String(e)); }
+      const t1 = { name: d.oldName, host: (d.host || '').trim(), user: t0.user, port: t0.port, keyFile: t0.keyFile, serial: d.serial || '', via: d.via || '' };
+      try { await call('SaveBoard', t1, d.oldName, !!d.makeDefault); closeModal(true); } catch (e) { toast('err', e.message || String(e)); }
       return;
     }
     if (t0.kind === 'ssh' && !t0.host) { d.addError = t('hostRequired'); invalidate('modal'); return; }

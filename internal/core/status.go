@@ -324,7 +324,7 @@ func (st *Status) PrimaryIP() string {
 
 // boardHost is the address a browser on this computer can use to reach the board.
 func (s *Session) boardHost(st *Status) string {
-	if s.Target.Kind == board.KindSSH && s.Target.Host != "" {
+	if s.Target.Host != "" {
 		return s.Target.Host
 	}
 	for _, ip := range st.IPs {

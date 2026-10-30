@@ -74,7 +74,7 @@ It is what you would otherwise do by hand over SSH, and an alternative to re-fla
 - **System updates without App Lab.** Quay lists what the board's update would download (on a fresh board, hundreds of MB) and runs the board's own `arduino-app-cli system update`: everything, or only the Arduino packages as App Lab's update does. Everything goes in two rounds, App Lab's packages first, so the apt rules they bring (Arduino's pins) already decide the rest; in one round the UNO Q loses its sound card until a second update puts Arduino's audio configuration back. It can also leave out the on-board desktop packages (App Lab, Chromium) a board used from a computer does not need, still doing what App Lab's update does besides apt: it refreshes the Arduino library and platform indexes, then runs `arduino-app-cli system init` (the Arduino platform, the libraries and build tools the example apps use, the app images) and `system cleanup` (images no longer needed). Otherwise the first app start after the update would download all that, unpacking the microcontroller's build tools for minutes. The update runs detached on the board, so a dropped Wi‑Fi link does not interrupt it.
 - **Faster downloads where the board is slow.** `quay mirror cn` tests eight mirrors in mainland China from the board itself and points pip, uv and apt's Debian packages at the fastest; apt also gets the next fastest and the official servers to fall back to by itself if a mirror breaks. `quay relay on` lets the board download through your computer (and its proxy) while Quay is connected. Both are separate, reversible commands, never applied implicitly.
 - **Reachable away from home.** Save a phone's hotspot next to the board's everyday Wi‑Fi, and choose what the board does when that Wi‑Fi is out of range: open a hotspot of its own (a phone then reaches the app at `http://10.42.0.1`), join the phone's hotspot, try the phone first and fall back to its own hotspot, or stay offline. It goes back to its Wi‑Fi by itself. See [Wi‑Fi and the away plan](#wifi-and-the-away-plan).
-- **SSH or USB.** Wi‑Fi/Ethernet over SSH (agent, key files, or password), or USB through `adb`.
+- **SSH and USB.** Wi‑Fi/Ethernet over SSH (agent, key files, or password), and USB through `adb`. A board Quay knows both ways is reached over the network first, and over the cable when the network does not answer and the board is plugged in; the way shown next to its name at the top switches to one way only. When nothing answers, the error lists every address tried and why it failed, after a second try a few seconds later.
 - **Updates itself, safely.** Quay checks its GitHub releases twice a day and offers a newer version; one click downloads it (through your proxy), checks that the release is signed with the Quay release key and that the file matches its checksum, replaces the app and restarts it. Nothing is installed without your click. `quay self-update` does the same from the command line.
 - **Native and small.** The app uses the system web view (WebKit on macOS and Linux, WebView2 on Windows) through [Wails v3](https://v3.wails.io); there is no bundled Chromium. One binary is both the app and the CLI.
 
@@ -102,7 +102,7 @@ For USB connections, install `adb` from Android SDK platform-tools (`brew instal
 
 Run Quay without arguments, or open it from the dock, Start menu or application menu.
 
-1. **Add a board.** Pick it from the boards Quay finds on your network, enter its address (for example `duck.local` or `192.168.1.42`), or choose it from the USB list. Quay connects, names the board after itself (its hostname), remembers its host key, and asks for the password only when no SSH key works.
+1. **Add a board.** Pick it from the boards Quay finds on your network, enter its address (for example `duck.local` or `192.168.1.42`), or choose it from the USB list. Quay connects, names the board after itself (its hostname), remembers its host key, and asks for the password only when no SSH key works. Adding a saved board the other way (over USB when it was saved by its address, or the other way round) adds that way to it.
 2. **Install an app.** Choose from **Custom** (apps that come with a Quay profile), paste a git URL (`owner/repo` works for GitHub), or pick a local folder. Quay shows what it found — app name, ref, commit, profile — before anything touches the board.
 3. **Run it.** Each app card shows its state, where it came from, its data files and whether it runs at boot. **Console** opens the app's own web UI. The ⋯ menu has update, logs, backup, restore, export, system setup and erase.
 4. **Keep the board current.** The **System** card shows the pending system updates; click it to see what they are, choose everything or Arduino's packages only, and install. The board menu (⋯ at the top) also renames the board.
@@ -122,7 +122,7 @@ If an app's safety check refuses to be stopped (the duck while its servos hold t
 quay [command] [flags]
 
 Boards       board scan · board add ADDRESS [--key FILE] [--default] [--upload-key] · board ls · board rm NAME · board default NAME
-             board usb · upload-key
+             board usb · board via NAME auto|network|usb · upload-key
 Apps         status · deploy REPO|DIR · update APP · start|stop|restart APP · autostart APP|none · logs APP [-f]
              open APP · backup APP · restore APP FILE · export APP · erase APP
 Board        upgrade [--check] [--arduino-only] [--skip-desktop] · rename NAME · prepare APP [--revert]
@@ -135,7 +135,7 @@ Other        refs REPO · shell · system [fix ID] · profiles [--refresh] [--au
 Global       -b/--board NAME · -H/--host ADDRESS · --json
 ```
 
-`ADDRESS` is `host`, `user@host[:port]` (user `arduino` by default), `adb`, or `adb:SERIAL`. `APP` is the folder name under `~/ArduinoApps` (or the app's name).
+`ADDRESS` is `host`, `user@host[:port]` (user `arduino` by default), `adb`, or `adb:SERIAL`. `board via` chooses how Quay reaches a board it knows both ways: `auto` (the network first, then USB), `network` or `usb`. `APP` is the folder name under `~/ArduinoApps` (or the app's name).
 
 ```bash
 # Find boards on the network and save one; it is named after its hostname

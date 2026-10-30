@@ -185,6 +185,11 @@ func OpenADB(ctx context.Context, t Target) (*ADB, error) {
 
 func (a *ADB) Describe() string { return "usb:" + a.serial }
 
+// Command is an adb command line for this device, e.g. Command("shell") for an interactive shell.
+func (a *ADB) Command(args ...string) *exec.Cmd {
+	return exec.Command(a.bin, append([]string{"-s", a.serial}, args...)...)
+}
+
 // Reverse makes connections to boardPort on the board's loopback arrive at localPort here.
 func (a *ADB) Reverse(ctx context.Context, boardPort, localPort int) error {
 	return a.run(a.cmd(ctx, "reverse", fmt.Sprintf("tcp:%d", boardPort), fmt.Sprintf("tcp:%d", localPort)), nil, nil, nil)

@@ -38,6 +38,11 @@ func (s *SSH) LoginPassword() string { return s.password }
 
 // DialSSH connects with ssh-agent keys, default key files, then password (asked via p).
 func DialSSH(ctx context.Context, t Target, p Prompter, knownHostsFile string) (*SSH, error) {
+	return dialSSH(ctx, t, p, knownHostsFile, 2)
+}
+
+// dialSSH is DialSSH with that many rounds of attempts to reach the board.
+func dialSSH(ctx context.Context, t Target, p Prompter, knownHostsFile string, rounds int) (*SSH, error) {
 	if t.Port == 0 {
 		t.Port = 22
 	}
@@ -115,26 +120,10 @@ func DialSSH(ctx context.Context, t Target, p Prompter, knownHostsFile string) (
 		HostKeyAlgorithms: knownAlgorithms(knownHostsFile, addr),
 		Timeout:           12 * time.Second,
 	}
-	d := net.Dialer{Timeout: 12 * time.Second}
 	// The host key is always checked against the name in addr, even when dialling a fallback IP.
-	first := dialAddress(ctx, t, addr)
-	conn, err := d.DialContext(ctx, "tcp", first)
-	if err != nil && ctx.Err() == nil {
-		// Right after the computer wakes or joins a network, the system resolver can answer a .local
-		// name with IPv6 addresses only (mDNS answers arrive one by one), and an IPv6 neighbour may
-		// not be reachable yet ("no route to host"). The board's IPv4 address usually is.
-		for _, alt := range ipv4Addresses(ctx, t) {
-			if alt == first {
-				continue
-			}
-			if c, err2 := d.DialContext(ctx, "tcp", alt); err2 == nil {
-				conn, err = c, nil
-				break
-			}
-		}
-	}
+	conn, err := dialBoard(ctx, t, addr, rounds)
 	if err != nil {
-		return nil, fmt.Errorf("cannot reach %s: %w", addr, err)
+		return nil, err
 	}
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
@@ -148,6 +137,124 @@ func DialSSH(ctx context.Context, t Target, p Prompter, knownHostsFile string) (
 	s.client = ssh.NewClient(c, chans, reqs)
 	go keepAlive(s.client)
 	return s, nil
+}
+
+// redialDelay is the pause before the second round of attempts.
+var redialDelay = 3 * time.Second
+
+// dialBoard opens the TCP connection to the board. When none of its addresses answers it tries
+// them all again after redialDelay, up to rounds times in all: a board on Wi‑Fi now and then
+// misses a first attempt and answers seconds later.
+func dialBoard(ctx context.Context, t Target, addr string, rounds int) (net.Conn, error) {
+	u := &UnreachableError{Addr: addr}
+	for round := 0; round < rounds; round++ {
+		if round > 0 {
+			select {
+			case <-time.After(redialDelay):
+			case <-ctx.Done():
+				return nil, u
+			}
+		}
+		conn, failed := dialRound(ctx, t, addr)
+		if conn != nil {
+			return conn, nil
+		}
+		u.Rounds = append(u.Rounds, failed)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, u
+}
+
+// dialRound tries the board's address, then (for a name) its IPv4 addresses, and reports every
+// address that failed.
+func dialRound(ctx context.Context, t Target, addr string) (net.Conn, []DialFailure) {
+	d := net.Dialer{Timeout: 12 * time.Second}
+	first := dialAddress(ctx, t, addr)
+	conn, err := d.DialContext(ctx, "tcp", first)
+	if err == nil {
+		return conn, nil
+	}
+	failed := []DialFailure{{Addr: first, Err: err}}
+	if ctx.Err() != nil {
+		return nil, failed
+	}
+	// Right after the computer wakes or joins a network, the system resolver can answer a .local
+	// name with IPv6 addresses only (mDNS answers arrive one by one), and an IPv6 neighbour may
+	// not be reachable yet ("no route to host"). The board's IPv4 address usually is.
+	for _, alt := range ipv4Addresses(ctx, t) {
+		if alt == first {
+			continue
+		}
+		c, err := d.DialContext(ctx, "tcp", alt)
+		if err == nil {
+			return c, nil
+		}
+		failed = append(failed, DialFailure{Addr: alt, Err: err})
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, failed
+}
+
+// UnreachableError is a board that answered at none of its addresses: every address of every
+// round of attempts, with why it failed.
+type UnreachableError struct {
+	Addr   string // as saved, e.g. duck.local:22
+	Rounds [][]DialFailure
+}
+
+// DialFailure is one address that did not answer.
+type DialFailure struct {
+	Addr string
+	Err  error
+}
+
+func (e *UnreachableError) Error() string {
+	var rounds []string
+	for _, r := range e.Rounds {
+		var parts []string
+		for _, f := range r {
+			parts = append(parts, f.String())
+		}
+		rounds = append(rounds, strings.Join(parts, "; "))
+	}
+	switch {
+	case len(rounds) == 0:
+		return "cannot reach " + e.Addr
+	case len(rounds) == 1:
+		return fmt.Sprintf("cannot reach %s: %s", e.Addr, rounds[0])
+	case rounds[0] == rounds[1]:
+		return fmt.Sprintf("cannot reach %s (twice, %s apart): %s", e.Addr, redialDelay, rounds[0])
+	}
+	return fmt.Sprintf("cannot reach %s: %s; %s later: %s", e.Addr, rounds[0], redialDelay, rounds[1])
+}
+
+// Unwrap lets errors.Is see the dial errors, a cancelled context among them.
+func (e *UnreachableError) Unwrap() []error {
+	var errs []error
+	for _, r := range e.Rounds {
+		for _, f := range r {
+			errs = append(errs, f.Err)
+		}
+	}
+	return errs
+}
+
+// String gives the address and the cause; for a name, also the address it resolved to, which
+// the system's dial error names.
+func (f DialFailure) String() string {
+	var op *net.OpError
+	if !errors.As(f.Err, &op) {
+		return f.Addr + ": " + f.Err.Error()
+	}
+	addr := f.Addr
+	if op.Addr != nil && op.Addr.String() != f.Addr {
+		addr += " (" + op.Addr.String() + ")"
+	}
+	return addr + ": " + op.Err.Error()
 }
 
 // dialAddress picks what to connect to. NAME.local names go through the system resolver first,

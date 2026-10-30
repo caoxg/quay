@@ -92,7 +92,7 @@ Quay 是给 Arduino UNO Q 的 Linux 一侧用的桌面应用，同时也是命�
 - **不用 App Lab 做系统更新。** Quay 会列出这次更新要下载什么（新板子往往有几百 MB），然后调用板子自己的 `arduino-app-cli system update`：可以全部更新，也可以像 App Lab 那样只更新 Arduino 的包。全部更新分两轮：先装 App Lab 的那组包，它们带来的 apt 规则（Arduino 的版本钉选）生效后，再装其余的包。如果一轮装完，UNO Q 的声卡会消失，要等第二次更新把 Arduino 的音频配置换回来。也可以跳过板载桌面的包（App Lab、Chromium），用电脑操作板子时用不到它们；这时 Quay 照样会做 App Lab 的更新在 apt 之外做的事：刷新 Arduino 库索引和平台索引，再执行 `arduino-app-cli system init`（Arduino 平台、示例 App 用到的库和编译工具、App 的 Docker 镜像）和 `system cleanup`（删掉不再需要的镜像）。否则这些都要等更新后第一次启动 App 时才下载，光解压单片机的编译工具就要好几分钟。更新在板子上独立运行，Wi‑Fi 断了也不会中断。
 - **板子下载慢时的加速。** `quay mirror cn` 先从板子上给 8 个国内镜像测速，把 pip、uv 和 apt 的 Debian 软件包指向最快的那个；apt 还会配上测速靠前的其他镜像和官方源，某个镜像坏了会自动换下一个。`quay relay on` 让板子在 Quay 连着的时候经你的电脑（及其代理）下载。两者都是独立、可撤销的命令，不会被顺带执行。
 - **出门也能连上。** 在固定 Wi‑Fi 之外再存一个手机热点，然后选好离开固定 Wi‑Fi 时板子怎么做：板子开热点（手机连上后打开 `http://10.42.0.1`）、连手机热点、先找手机热点、找不到再由板子开热点，或者干脆不联网。回到 Wi‑Fi 范围后会自己连回去。详见[Wi‑Fi 和出门时的策略](#wifi-和出门时的策略)。
-- **SSH 或 USB。** Wi‑Fi/有线走 SSH（agent、密钥文件或密码），也可以用 USB（`adb`）。
+- **SSH 和 USB。** Wi‑Fi/有线走 SSH（agent、密钥文件或密码），也可以用 USB（`adb`）。两种连接都记下的板子，先走网络；网络连不上、板子又插着 USB 线时，改走 USB。顶部板子名旁边的连接方式可以切换成只用其中一种。都连不上时，报错里会列出试过的每个地址和失败原因，而且是隔几秒又试了一次之后。
 - **安全地自动更新。** Quay 每天两次检查 GitHub 上的新版本，有新版就提示；点一下就会下载（走你的代理）、验证发布签名和校验和、替换应用并重启。不点就什么都不装。命令行用 `quay self-update`。
 - **原生、轻量。** 界面使用系统自带的 WebView（macOS、Linux 上是 WebKit，Windows 上是 WebView2），基于 [Wails v3](https://v3.wails.io)，不打包 Chromium。同一个程序既是桌面应用也是 CLI。
 
@@ -120,7 +120,7 @@ sudo ln -s /Applications/Quay.app/Contents/MacOS/quay /usr/local/bin/quay
 
 不带参数运行 Quay，或者从程序坞、开始菜单、应用菜单打开。
 
-1. **添加板子。** 从 Quay 在网络里找到的板子中选一块，或者输入地址（比如 `duck.local` 或 `192.168.1.42`），或者从 USB 列表里选。Quay 连上后用板子自己的主机名给它命名，记住它的主机密钥；只有在 SSH 密钥都不可用时才会问密码。
+1. **添加板子。** 从 Quay 在网络里找到的板子中选一块，或者输入地址（比如 `duck.local` 或 `192.168.1.42`），或者从 USB 列表里选。Quay 连上后用板子自己的主机名给它命名，记住它的主机密钥；只有在 SSH 密钥都不可用时才会问密码。已保存的板子换一种方式再添加一次（原来按地址保存的改用 USB 添加，或者反过来），会给它补上这种连接，不会覆盖原来的。
 2. **安装应用。** 从「定制」里选（带 Quay 配置的 App），或粘贴 git 地址（GitHub 可以只写 `owner/repo`），或选本地文件夹。在动板子之前，Quay 会先给你看它找到了什么：应用名、版本、commit、配置。
 3. **运行。** 每张应用卡片显示状态、来源、数据文件、是否开机运行。**控制台** 按钮打开应用自己的网页界面。⋯ 菜单里有更新、日志、备份、恢复、导出、系统设置和删除。
 4. **保持系统最新。** 「系统」卡片显示待安装的系统更新；点开能看到具体内容，可以选择全部更新或只更新 Arduino 的包，然后安装。顶部的板子菜单（⋯）里还可以重命名板子。
@@ -145,7 +145,7 @@ sudo ln -s /Applications/Quay.app/Contents/MacOS/quay /usr/local/bin/quay
 quay [命令] [参数]
 
 板子       board scan · board add 地址 [--key 文件] [--default] [--upload-key] · board ls · board rm 名称 · board default 名称
-           board usb · upload-key
+           board usb · board via 名称 auto|network|usb · upload-key
 应用       status · deploy 仓库|目录 · update 应用 · start|stop|restart 应用 · autostart 应用|none · logs 应用 [-f]
            open 应用 · backup 应用 · restore 应用 文件 · export 应用 · erase 应用
 板子系统   upgrade [--check] [--arduino-only] [--skip-desktop] · rename 名字 · prepare 应用 [--revert]
@@ -158,7 +158,7 @@ quay [命令] [参数]
 全局       -b/--board 名称 · -H/--host 地址 · --json
 ```
 
-`地址` 是 `host`、`user@host[:port]`（用户默认是 `arduino`）、`adb` 或 `adb:序列号`。`应用` 是 `~/ArduinoApps` 下的文件夹名（或应用名）。
+`地址` 是 `host`、`user@host[:port]`（用户默认是 `arduino`）、`adb` 或 `adb:序列号`。`board via` 选择两种连接都记下的板子怎么连：`auto`（先走网络，再用 USB）、`network` 或 `usb`。`应用` 是 `~/ArduinoApps` 下的文件夹名（或应用名）。
 
 ```bash
 # 在网络里找板子，保存一块；名字就是它的主机名

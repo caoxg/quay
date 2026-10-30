@@ -69,3 +69,32 @@ func TestLearnAfterAnotherRename(t *testing.T) {
 		t.Fatalf("unknown board without a serial: %q %v", n, ch)
 	}
 }
+
+func TestAdopt(t *testing.T) {
+	c := &Config{Boards: []board.Target{
+		{Name: "duck", Kind: board.KindSSH, Host: "duck.local", Port: 22, User: "arduino", BoardID: "A", LastIP: "192.168.2.163", SkipDesktop: true, Via: board.KindSSH},
+		{Name: "rig", Kind: board.KindADB, Serial: "B", BoardID: "B"},
+	}}
+
+	// Over USB: the network address and the settings stay, and USB counts again.
+	name, replaced, joined := c.Adopt(board.Target{Kind: board.KindADB, Serial: "A"}, "duck", "A")
+	if b, _ := c.Board("duck"); name != "duck" || replaced != "" || !joined || b.Host != "duck.local" || b.LastIP != "192.168.2.163" || b.Serial != "A" || !b.SkipDesktop || b.Via != "" || b.Kind != board.KindSSH {
+		t.Fatalf("USB onto a network board: %q %q %v %+v", name, replaced, joined, b)
+	}
+
+	// Over the network: a USB board gains its address.
+	name, replaced, joined = c.Adopt(board.Target{Kind: board.KindSSH, Host: "rig.local", User: "arduino", Port: 22}, "rig", "B")
+	if b, _ := c.Board("rig"); name != "rig" || replaced != "" || !joined || b.Host != "rig.local" || b.Serial != "B" || b.Kind != board.KindSSH {
+		t.Fatalf("network onto a USB board: %q %q %v %+v", name, replaced, joined, b)
+	}
+
+	// Another address for the same board replaces the old one.
+	if _, replaced, joined = c.Adopt(board.Target{Kind: board.KindSSH, Host: "192.168.2.50", User: "arduino", Port: 22}, "rig", "B"); replaced != "arduino@rig.local" || joined {
+		t.Fatalf("new address: %q %v", replaced, joined)
+	}
+
+	// A board not saved yet is named after itself.
+	if name, _, _ = c.Adopt(board.Target{Kind: board.KindADB, Serial: "C"}, "duck", "C"); name != "duck-2" {
+		t.Fatalf("new board: %q", name)
+	}
+}
