@@ -54,3 +54,18 @@ func TestLearn(t *testing.T) {
 		t.Fatalf("next free: %q", n)
 	}
 }
+
+// A first setup renames the board while the board page keeps refreshing: whichever learns the new
+// hostname first renames the saved board, and the other finds it by its serial number.
+func TestLearnAfterAnotherRename(t *testing.T) {
+	c := &Config{Default: "uno-q", Boards: []board.Target{{Name: "uno-q", Kind: board.KindADB, BoardID: "1216269555"}}}
+	if n, ch := c.Learn("uno-q", "duck", "1216269555", ""); n != "duck" || !ch {
+		t.Fatalf("first: %q %v", n, ch)
+	}
+	if n, ch := c.Learn("uno-q", "duck", "1216269555", ""); n != "duck" || ch {
+		t.Fatalf("second, under the old name: %q %v", n, ch)
+	}
+	if n, ch := c.Learn("gone", "gone", "", ""); n != "gone" || ch {
+		t.Fatalf("unknown board without a serial: %q %v", n, ch)
+	}
+}

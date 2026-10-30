@@ -25,6 +25,9 @@ type Config struct {
 	RelayUpstream string `json:"relayUpstream,omitempty"`
 	// PolicyIndexes are policy indexes read in addition to the community one (URLs or local paths).
 	PolicyIndexes []string `json:"policyIndexes,omitempty"`
+	// ProfilesManual turns off fetching newer profiles (github.com/caoxg/quay-profiles) by
+	// themselves; Quay then uses the copy it has until asked to fetch.
+	ProfilesManual bool `json:"profilesManual,omitempty"`
 }
 
 var mu sync.Mutex
@@ -164,13 +167,20 @@ func (c *Config) UniqueName(base, boardID string) string {
 // Learn records what a connection revealed about a saved board: its hostname (which is its name in
 // Quay), its serial number and its current IPv4 address. It returns the board's name afterwards
 // and whether anything changed (the caller saves). A board reached through its mDNS name follows a
-// rename: duck.local becomes goose.local.
+// rename: duck.local becomes goose.local. A board saved under name no more, because another
+// operation followed its rename first (the board page's refresh during a first setup), is found by
+// its serial number.
 func (c *Config) Learn(name, hostname, serial, ip string) (string, bool) {
 	i := -1
 	for j, b := range c.Boards {
 		if strings.EqualFold(b.Name, name) {
 			i = j
 			break
+		}
+	}
+	for j, b := range c.Boards {
+		if i < 0 && serial != "" && b.BoardID == serial {
+			i = j
 		}
 	}
 	if i < 0 {

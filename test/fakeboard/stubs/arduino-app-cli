@@ -62,6 +62,14 @@ def resolve_libs():
     rp = LIB / "Arduino_RPClite_0.3.1_def/Arduino_RPClite/src"
     if rb.exists():
         return
+    # Like App CLI: a pinned library is only downloaded when the board's library index lists it,
+    # and without RouterBridge the sketch builds against the core's stub header, which fails.
+    try:
+        listed = json.loads((HOME / ".arduino15/library_index.json").read_text())["libraries"]
+    except (OSError, ValueError, KeyError):
+        listed = []
+    if {"name": "Arduino_RouterBridge", "version": "0.4.3"} not in listed:
+        sys.exit('#error "Please install the Arduino_RouterBridge library from the Library Manager for proper Serial support on this board."')
     rb.mkdir(parents=True); rp.mkdir(parents=True)
     (rb / "bridge.h").write_text("#pragma once\n#define UPDATE_THREAD_STACK_SIZE    500\n")
     (rp / "decoder.h").write_text('#include "transport.h"\nclass D {\n    void parse_packet(){\n      old();\n    }\n    bool packet_incoming() { return true; }\n};\n')
@@ -76,7 +84,8 @@ def start(path):
     for m in sorted((path / "python").glob("*.onnx")):
         if b"QUAY_FAKE_BROKEN" in m.read_bytes():
             sys.exit(f"Error: app failed to start: {m.name}: model failed to load")
-    resolve_libs()
+    if (path / "sketch").exists():
+        resolve_libs()
     sketch = path / ".cache/sketch"
     if (path / "sketch").exists() and not sketch.exists():
         sketch.mkdir(parents=True)
@@ -113,12 +122,20 @@ elif args[:2] == ["system", "update"]:
         sys.exit("refusing to update without --yes when there is no terminal")
     db = json.loads(pathlib.Path("/var/lib/fake-apt/db.json").read_text())
     names = [n for n, p in db["packages"].items() if n in db["installed"] and db["installed"][n] != p["version"]
-             and ("--only-arduino" not in args or "arduino.cc" in p["uri"])]
+             and ("--only-arduino" not in args or n.startswith("arduino-"))]  # App CLI's MatchArduinoPackage
     for cmd in (["sudo", "-n", "/usr/bin/apt-get", "update"],
                 ["sudo", "-n", "/usr/bin/apt-get", "install", "--only-upgrade", "-y"] + names):
         if subprocess.run(cmd, stdin=subprocess.DEVNULL).returncode:
             sys.exit("system update failed")
     print("System updated")
+elif args[:2] == ["system", "init"]:  # what App CLI's update pulls besides apt (json-lines with --format)
+    for line in ({"type": "log", "source": "arduino", "message": "Downloading libs and platforms used in examples ..."},
+                 {"type": "log", "source": "docker", "message": "Pulling the latest docker images ..."},
+                 {"type": "progress", "source": "docker", "label": "Pulling image 1/1", "current": 400, "total": 1000, "percent": 40},
+                 {"type": "progress", "source": "docker", "label": "Pulling image 1/1", "current": 1000, "total": 1000, "percent": 100}):
+        print(json.dumps(line) if fmt_json else line.get("message", ""), flush=True)
+elif args[:2] == ["system", "cleanup"]:
+    print("Cleanup completed:\n- 0 containers\n- 1 images (830MiB)\n- 0 networks")
 elif args[:2] == ["app", "list"]:
     apps = []
     for d in sorted(APPS.glob("*/app.yaml")):

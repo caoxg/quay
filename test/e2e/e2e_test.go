@@ -163,6 +163,10 @@ func TestEndToEnd(t *testing.T) {
 		if !res.Rebuilt || !res.NeedsSetup {
 			t.Fatalf("expected a rebuild after patching and a setup hint: %+v", res)
 		}
+		// The image's library index predates the pinned RouterBridge 0.4.3; its platform index is fine.
+		if got := sh(t, "cat /tmp/fake-arduino-cli.log"); got != "lib update-index" {
+			t.Fatalf("expected one library index update before the first build, got %q", got)
+		}
 		if got := sh(t, "cat "+appDir+"/.cache/sketch/built-with"); !strings.Contains(got, "4096") {
 			t.Fatalf("sketch was not rebuilt against the patched library: %q", got)
 		}
@@ -523,12 +527,20 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("download through the relay: %q", got)
 		}
 		st, _ := s.Status(ctx)
-		if !st.Relay.Installed || !st.Relay.Active {
+		if !st.Relay.Installed || !st.Relay.Active || st.Relay.Outdated {
 			t.Fatalf("status relay: %+v", st.Relay)
 		}
 		s.StopRelay()
 		if got := sh(t, "/usr/local/lib/quay/apt-proxy"); got != "DIRECT" {
 			t.Fatalf("hook after stopping: %q", got)
+		}
+		// A port held by something else than Quay's relay (a connection an earlier Quay left behind,
+		// which sshd has not noticed yet) accepts and never answers: apt downloads directly.
+		sh(t, `nohup python3 -c 'import socket, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", 18765)); s.listen()
+c, _ = s.accept(); time.sleep(5)' >/dev/null 2>&1 & sleep 0.5`)
+		if got := sh(t, "/usr/local/lib/quay/apt-proxy"); got != "DIRECT" {
+			t.Fatalf("hook with the port held by something else: %q", got)
 		}
 		if err := s.Relay(ctx, sink, false); err != nil {
 			t.Fatal(err)
@@ -571,27 +583,78 @@ func TestEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		last = core.Progress{}
+		last, mid := core.Progress{}, 0
 		for _, e := range evs() {
 			if e.Type == "progress" && e.Step == "upgrade" {
-				last = e.Data.(core.Progress)
+				if last = e.Data.(core.Progress); last.Percent < 100 {
+					mid++ // from apt's pmstatus lines, while it installs
+				}
 			}
 		}
-		if last.Percent != 100 || last.Unit != "packages" {
-			t.Fatalf("install progress: %+v", last)
+		if last.Percent != 100 || last.Unit != "packages" || mid == 0 {
+			t.Fatalf("install progress: %+v (%d before the end)", last, mid)
+		}
+		// Two rounds: App Lab's packages first (they may bring new apt rules), then the rest.
+		var rounds []string
+		for _, e := range evs() {
+			if e.Type == "step" && e.State == "ok" && strings.HasPrefix(e.Step, "upgrade") {
+				rounds = append(rounds, e.Step)
+			}
+		}
+		if strings.Join(rounds, " ") != "upgrade_arduino upgrade" {
+			t.Fatalf("install rounds %v", rounds)
+		}
+		// Then what App Lab's update adds besides apt, with the images' download as its progress.
+		applab := false
+		for _, e := range evs() {
+			if e.Type == "step" && e.Step == "applab" && e.State == "ok" {
+				applab = true
+			}
+		}
+		if calls := sh(t, "cat /tmp/fake-appcli/calls.log"); !applab || !strings.Contains(calls, "system init --format json-lines") || !strings.Contains(calls, "system cleanup") {
+			t.Fatalf("App Lab's additions: step ok %v, calls %q", applab, calls)
+		}
+		// Both rounds install from the cache the download filled: the first leaves it alone.
+		cur := ""
+		for _, e := range evs() {
+			if e.Type == "step" && e.State == "run" {
+				cur = e.Step
+			}
+			if e.Type == "log" && strings.HasPrefix(cur, "upgrade") && strings.HasPrefix(e.Text, "Get:") {
+				t.Fatalf("%s downloaded again: %s", cur, e.Text)
+			}
 		}
 		if res.Remaining != 3 || !strings.Contains(res.AppCLIVersion, "0.14.0") {
 			t.Fatalf("after skipping the desktop: %+v", res)
 		}
+		// …and refreshes the Arduino indexes, which App CLI's update does on its own.
+		if got := sh(t, "tail -n 2 /tmp/fake-arduino-cli.log"); got != "core update-index\nlib update-index" {
+			t.Fatalf("the update without the desktop did not refresh the Arduino indexes: %q", got)
+		}
 		if sh(t, "cat /tmp/quay-upgrade/rc") != "0" {
 			t.Fatal("the detached job did not record success")
+		}
+		unpacked := 0 // the install's output reaches its step through the job's log
+		for _, e := range evs() {
+			if e.Type == "log" && strings.HasPrefix(e.Text, "Unpacking ") {
+				unpacked++
+			}
+		}
+		if unpacked == 0 {
+			t.Fatal("the install's output did not reach the job's log") // the list's first command once went to /dev/null
+		}
+		// After a dropped connection, the finished job is picked up again: its result, no error.
+		if r, err := s.FollowUpgrade(ctx, sink, core.UpgradeOptions{}); err != nil || r.Remaining != 3 {
+			t.Fatalf("follow the finished update: %+v %v", r, err)
 		}
 		// …everything else goes through the board's own `arduino-app-cli system update`.
 		if _, err := s.Upgrade(ctx, sink, core.UpgradeOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(sh(t, "cat /tmp/fake-appcli/calls.log"), "system update --yes") {
-			t.Fatal("arduino-app-cli system update was not used")
+		// App Lab's packages through Quay's apt command (App CLI would empty the cache), then the rest
+		// through arduino-app-cli.
+		if calls := sh(t, "grep '^system update' /tmp/fake-appcli/calls.log"); calls != "system update --yes" {
+			t.Fatalf("expected the second round only through arduino-app-cli: %q", calls)
 		}
 		u, err = s.CheckUpgrades(ctx, sink, false)
 		if err != nil || u.Total.Count != 0 {
@@ -740,6 +803,97 @@ func TestCLI(t *testing.T) {
 
 // TestNetwork saves Wi-Fi networks and phone hotspots and walks through the away plans on the fake
 // board (its nmcli keeps profiles from the keyfiles Quay writes; nothing runs the service).
+// pwOf answers password prompts with a given password.
+type pwOf string
+
+func (p pwOf) Secret(context.Context, string, string) (string, bool, error) {
+	return string(p), true, nil
+}
+func (p pwOf) TrustHostKey(context.Context, string, string, string) (bool, error) {
+	return true, nil
+}
+
+func TestPassword(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	target := board.Target{Kind: board.KindSSH, Host: "127.0.0.1", Port: port, User: "arduino"}
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	s, err := core.Connect(ctx, target, &pw{}, kh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sink, _ := collect(t)
+	if err := s.SetPassword(ctx, sink, `back\slash`); err == nil {
+		t.Fatal("accepted a backslash, which arduino-passwd drops")
+	}
+	if err := s.SetPassword(ctx, sink, "new pass 9"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { // later tests log in with the old one
+		if err := s.SetPassword(ctx, sink, password); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if _, err := core.Connect(ctx, target, pwOf(password), kh); err == nil {
+		t.Fatal("the old password still logs in")
+	}
+	s2, err := core.Connect(ctx, target, pwOf("new pass 9"), kh)
+	if err != nil {
+		t.Fatalf("the new password does not log in: %v", err)
+	}
+	s2.Close() // SetPassword itself checked that sudo takes the new password
+}
+
+// noTrust answers password prompts but trusts no host key it is asked about.
+type noTrust string
+
+func (p noTrust) Secret(context.Context, string, string) (string, bool, error) {
+	return string(p), true, nil
+}
+func (noTrust) TrustHostKey(context.Context, string, string, string) (bool, error) {
+	return false, nil
+}
+
+func TestFirstSetup(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	target := board.Target{Kind: board.KindSSH, Host: "127.0.0.1", Port: port, User: "arduino"}
+	s, err := core.Connect(ctx, target, &pw{}, filepath.Join(t.TempDir(), "known_hosts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sink, _ := collect(t)
+	// A fresh image: SSH off (here only as the fake systemctl reports it; the test still uses it).
+	sh(t, "mkdir -p /var/lib/fake-systemd && touch /var/lib/fake-systemd/ssh.inactive /var/lib/fake-systemd/ssh.disabled")
+	defer sh(t, "rm -f /var/lib/fake-systemd/ssh.*")
+	st, err := s.Status(ctx)
+	if err != nil || st.Setup == nil || st.Setup.SSHActive || st.Setup.SSHEnabled || st.Setup.Password != "P" || !st.Setup.Needed() {
+		t.Fatalf("fresh: %v %+v", err, st.Setup)
+	}
+	keys, err := s.EnableSSH(ctx, sink)
+	if err != nil || len(keys) == 0 {
+		t.Fatalf("ssh on: %v %v", err, keys)
+	}
+	if st, err := s.Status(ctx); err != nil || !st.Setup.SSHActive || !st.Setup.SSHEnabled || st.Setup.Needed() {
+		t.Fatalf("after: %v %+v", err, st.Setup)
+	}
+	// The keys read over the session are trusted without asking.
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	if err := board.PinHostKeys(kh, "127.0.0.1", port, keys); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := core.Connect(ctx, target, noTrust(password), kh)
+	if err != nil {
+		t.Fatalf("the pinned keys were not enough: %v", err)
+	}
+	s2.Close()
+	if _, err := core.Connect(ctx, target, noTrust(password), filepath.Join(t.TempDir(), "known_hosts")); err == nil {
+		t.Fatal("connected without trusting the host key")
+	}
+}
+
 func TestNetwork(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -836,6 +990,28 @@ func TestNetwork(t *testing.T) {
 		if err := s.WifiAdd(ctx, sink, "bad;name", "", false, false); err == nil {
 			t.Fatal("accepted a ';' in the name")
 		}
+	})
+
+	t.Run("connect now: refused out of range, switches a few seconds later in range", func(t *testing.T) {
+		phone := profile(network(), "Wei's phone").UUID
+		if err := s.WifiConnect(ctx, sink, phone); err == nil || !strings.Contains(err.Error(), "not in range") {
+			t.Fatalf("out of range: %v", err)
+		}
+		sh(t, `python3 -c "import json; p='/var/lib/fake-nm/state.json'; s=json.load(open(p)); s['in_range'][\"Wei's phone\"]=60; json.dump(s, open(p,'w'))"`)
+		defer sh(t, `python3 -c "import json; p='/var/lib/fake-nm/state.json'; s=json.load(open(p)); s['in_range'].pop(\"Wei's phone\", None); json.dump(s, open(p,'w'))"`)
+		if err := s.WifiConnect(ctx, sink, phone); err != nil {
+			t.Fatal(err)
+		}
+		if profile(network(), "Wei's phone").Active {
+			t.Fatal("switched before the script returned")
+		}
+		for i := 0; !profile(network(), "Wei's phone").Active; i++ {
+			if i == 20 {
+				t.Fatal("the board did not switch")
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		setActive("Duck-Setup-home")
 	})
 
 	t.Run("own hotspot needs its settings, then keeps the phone out", func(t *testing.T) {
@@ -970,6 +1146,9 @@ func TestSystemProfile(t *testing.T) {
 	if st.System == nil || st.System.ID != "duck-os" || st.System.Version != "0.1.0-rc6" || st.System.Base != "20260528-558" {
 		t.Fatalf("system: %+v", st.System)
 	}
+	if h := st.Net.SystemHotspot; h == nil || h.System != "Duck OS" || h.SSID != "XGO-Duck" || !h.Autoconnect {
+		t.Fatalf("Duck OS's own hotspot: %+v", h)
+	}
 	exists, keys := sysprofile.Checks(sysprofile.Builtin().Profiles)
 	var out, errb strings.Builder
 	if err := s.T.Exec(ctx, "python3 -", strings.NewReader(remote.WithChecks(remote.Status, exists, keys)), &out, &errb); err != nil {
@@ -994,6 +1173,9 @@ func TestSystemProfile(t *testing.T) {
 	}
 	if got := sh(t, `python3 -c "import json; print(json.load(open('/var/lib/fake-nm/state.json'))['profiles']['dddddddd-0000-0000-0000-000000000000']['connection.autoconnect'])"`); got != "no" {
 		t.Fatalf("autoconnect %q", got)
+	}
+	if st, err := s.Status(ctx); err != nil || st.Net.SystemHotspot == nil || st.Net.SystemHotspot.Autoconnect {
+		t.Fatalf("after the fix the card should say it does not start by itself: %v %+v", err, st.Net)
 	}
 	if err := s.SystemFix(ctx, sink, "duck-setup-hotspot"); err == nil || !strings.Contains(err.Error(), "does not apply") {
 		t.Fatalf("fixed twice: %v", err)

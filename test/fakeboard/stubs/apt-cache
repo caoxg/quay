@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Stand-in for apt-cache on the fake board: `policy PKG…` from the fake package database (the
+candidate is the database's version), so Quay's update plan matches what the fake apt-get does."""
+import json, pathlib, sys
+
+db = json.loads(pathlib.Path("/var/lib/fake-apt/db.json").read_text())
+args = sys.argv[1:]
+if not args or args[0] != "policy":
+    sys.exit(0)
+for name in args[1:]:
+    p = db["packages"].get(name)
+    cur = db["installed"].get(name)
+    if p is None and cur is None:
+        continue
+    print(f"{name}:")
+    print(f"  Installed: {cur or '(none)'}")
+    print(f"  Candidate: {p['version'] if p else cur}")

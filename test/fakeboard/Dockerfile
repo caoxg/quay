@@ -1,5 +1,5 @@
 # A fake Arduino UNO Q for Quay's end-to-end tests: Debian + sshd + sudo (password required)
-# + stand-ins for arduino-app-cli, systemctl, systemd-run, hostnamectl, nmcli and apt-get. Not a real board — it only mimics what Quay touches.
+# + stand-ins for arduino-app-cli, arduino-cli, systemctl, systemd-run, hostnamectl, nmcli and apt-get. Not a real board — it only mimics what Quay touches.
 FROM python:3.12-slim
 
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server sudo procps iproute2 >/dev/null \
@@ -11,13 +11,17 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh
     && chown arduino /home/arduino/ArduinoApps /var/lib/arduino-app-cli \
     && sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
-COPY stubs/arduino-app-cli /usr/local/bin/
+COPY stubs/arduino-app-cli stubs/arduino-cli stubs/arduino-passwd /usr/local/bin/
+# The library and platform indexes of the image's build day, older than what the sketch pins.
+COPY --chown=arduino stubs/arduino15/ /home/arduino/.arduino15/
 COPY stubs/systemctl stubs/systemd-run stubs/hostnamectl stubs/nmcli /usr/bin/
 COPY stubs/fake-apt-db.json /var/lib/fake-apt/db.json
 COPY stubs/apt-get /usr/local/lib/fake-apt-get
+COPY stubs/apt-cache /usr/local/bin/apt-cache
 COPY sudoers-arduino /etc/sudoers.d/arduino
 # apt-get goes last: everything above still needed the real one.
-RUN chmod 755 /usr/local/bin/arduino-app-cli /usr/bin/systemctl /usr/bin/systemd-run /usr/bin/hostnamectl /usr/bin/nmcli \
+RUN chmod 755 /usr/local/bin/arduino-app-cli /usr/local/bin/arduino-cli /usr/local/bin/arduino-passwd /usr/bin/systemctl /usr/bin/systemd-run /usr/bin/hostnamectl /usr/bin/nmcli \
+    && chown -R arduino:arduino /home/arduino/.arduino15 \
     && chmod 440 /etc/sudoers.d/arduino && chmod 644 /var/lib/fake-apt/db.json \
     && install -m 666 /dev/null /var/log/fake-systemctl.log \
     && mv /usr/bin/apt-get /usr/bin/apt-get.real && install -m 755 /usr/local/lib/fake-apt-get /usr/bin/apt-get

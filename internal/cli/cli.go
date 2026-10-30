@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 
+	"github.com/caoxg/quay/internal/applog"
 	"github.com/caoxg/quay/internal/board"
 	"github.com/caoxg/quay/internal/config"
 	"github.com/caoxg/quay/internal/core"
@@ -55,10 +56,14 @@ func Execute(gui func() error) int {
 		Version:       version.Version,
 	}
 	isTTY = term.IsTerminal(int(os.Stdout.Fd())) && enableANSI(os.Stdout)
-	hub.Default = &hub.Loader{Dir: config.ProfileCacheDir()}
+	hub.Default = &hub.Loader{Dir: config.ProfileCacheDir(), Manual: profilesManual}
 	root.PersistentFlags().StringVarP(&flagBoard, "board", "b", "", "saved board to use (default: the default board)")
 	root.PersistentFlags().StringVarP(&flagHost, "host", "H", "", "board address instead of a saved board: user@host[:port], adb or adb:SERIAL")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "print machine-readable JSON events")
+	root.PersistentPreRun = func(cmd *cobra.Command, _ []string) {
+		logTag, logApp = "["+cmd.CommandPath()+"]", cmd.Name() == "logs"
+		applog.Default.Printf("%s begin", logTag) // the arguments stay out: some carry passwords
+	}
 
 	root.AddCommand(boardCmd(), statusCmd(), refsCmd(), deployCmd(), updateCmd(),
 		simpleCmd("start", "Start an app", func(ctx context.Context, s *core.Session, sink core.Sink, app string, force bool) error {
@@ -70,13 +75,24 @@ func Execute(gui func() error) int {
 		simpleCmd("restart", "Restart an app", func(ctx context.Context, s *core.Session, sink core.Sink, app string, force bool) error {
 			return s.Restart(ctx, sink, app, force)
 		}),
-		autostartCmd(), logsCmd(), prepareCmd(), mirrorCmd(), relayCmd(), wifiCmd(), hotspotCmd(), upgradeCmd(), renameCmd(), uploadKeyCmd(),
+		autostartCmd(), logsCmd(), prepareCmd(), mirrorCmd(), relayCmd(), wifiCmd(), hotspotCmd(), upgradeCmd(), renameCmd(), passwdCmd(), sshCmd(), uploadKeyCmd(),
 		backupCmd(), restoreCmd(), exportCmd(), eraseCmd(),
-		policyCmd(), openCmd(), shellCmd(), systemCmd(), profilesCmd(), licensesCmd())
+		policyCmd(), openCmd(), shellCmd(), systemCmd(), profilesCmd(), selfUpdateCmd(), licensesCmd())
 	if gui != nil {
 		root.AddCommand(&cobra.Command{Use: "gui", Short: "Open the Quay app", RunE: func(*cobra.Command, []string) error { return gui() }})
 	}
-	if err := root.Execute(); err != nil {
+	cmd, err := root.ExecuteC()
+	if err == nil {
+		updateNotice(cmd)
+	}
+	if logTag != "" {
+		if err != nil {
+			applog.Default.Printf("%s end fail: %v", logTag, err)
+		} else {
+			applog.Default.Printf("%s end ok", logTag)
+		}
+	}
+	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			fmt.Fprintln(os.Stderr, "cancelled")
 			return 130
@@ -117,7 +133,17 @@ type printer struct {
 	eta     eta
 }
 
+// logTag names the running command in Quay's log; logApp is set for `quay logs`, whose output is
+// the app's own log and stays out of Quay's.
+var (
+	logTag string
+	logApp bool
+)
+
 func (p *printer) sink(e core.Event) {
+	if !(logApp && e.Type == "log") {
+		core.Record(logTag, e)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if flagJSON {
@@ -967,8 +993,8 @@ func relayCmd() *cobra.Command {
 				return err
 			}
 			if cmd.Flags().Changed("upstream") {
-				if _, err := relay.Upstream(upstream); err != nil && upstream != "" {
-					return err
+				if p, d := relay.Check(upstream); p != "" {
+					return fmt.Errorf("proxy %q: %s (%s); give host:port, or an http://, https:// or socks5:// URL, of a proxy that works from this computer", upstream, p, d)
 				}
 				cfg.RelayUpstream = upstream
 				if err := cfg.Save(); err != nil {
@@ -1018,24 +1044,171 @@ func renameCmd() *cobra.Command {
 	}
 }
 
+func sshCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "ssh [on]",
+		Short: "Show whether the board's SSH server is on; on: turn it on, as App Lab's first setup does",
+		Long: "A board that never had App Lab's first setup has no SSH server and no usable password: reach it\n" +
+			"over USB (quay -H adb …), set a password (quay passwd), save its Wi-Fi (quay wifi add) and run\n" +
+			"quay ssh on. Quay trusts the host keys it reads over USB, so the first SSH login asks nothing.",
+		Example:   "  quay -H adb ssh\n  quay -H adb ssh on\n  quay board add duck.local",
+		Args:      cobra.MaximumNArgs(1),
+		ValidArgs: []string{"on"},
+		RunE: func(_ *cobra.Command, a []string) error {
+			if len(a) == 1 && a[0] != "on" {
+				return fmt.Errorf("unknown argument %q (only: on)", a[0])
+			}
+			return withSession(func(ctx context.Context, s *core.Session, sink core.Sink) error {
+				st, err := s.Status(ctx)
+				if err != nil {
+					return err
+				}
+				if len(a) == 0 {
+					if st.Setup == nil {
+						return errors.New("the board did not say")
+					}
+					fmt.Printf("SSH server: %s (%s at boot)\nPassword:   %s\n", map[bool]string{true: "on", false: "off"}[st.Setup.SSHActive],
+						map[bool]string{true: "starts", false: "does not start"}[st.Setup.SSHEnabled], passwordState(st.Setup.Password))
+					if st.Setup.Needed() {
+						fmt.Println("This board has not had its first setup: quay passwd, then quay ssh on.")
+					}
+					return nil
+				}
+				keys, err := s.EnableSSH(ctx, sink)
+				if err != nil {
+					return err
+				}
+				host := st.Hostname + ".local"
+				if err := board.PinHostKeys(config.KnownHostsFile(), host, 22, keys); err != nil {
+					return err
+				}
+				fmt.Printf("SSH is on: ssh arduino@%s (Quay trusts its host keys). quay board add %s saves it.\n", host, host)
+				return nil
+			})
+		},
+	}
+	return c
+}
+
+func passwordState(p string) string {
+	switch p {
+	case "P":
+		return "set"
+	case "L":
+		return "locked (none usable)"
+	case "NP":
+		return "none"
+	}
+	return "unknown"
+}
+
+func passwdCmd() *cobra.Command {
+	var stdin bool
+	c := &cobra.Command{
+		Use:   "passwd",
+		Short: "Set the board's password (no current password needed over USB)",
+		Long: "Sets the password of the board's user (arduino), for logging in and for sudo, with the board\n" +
+			"image's own arduino-passwd — the way App Lab's first setup does. It needs no current password, so\n" +
+			"over USB it also works on a board whose password nobody knows.",
+		Example: "  quay -H adb passwd\n  printf '%s\\n' \"$PW\" | quay passwd --password-stdin",
+		Args:    cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error {
+			pw, err := readNewPassword(stdin)
+			if err != nil {
+				return err
+			}
+			return withSession(func(ctx context.Context, s *core.Session, sink core.Sink) error {
+				return s.SetPassword(ctx, sink, pw)
+			})
+		},
+	}
+	c.Flags().BoolVar(&stdin, "password-stdin", false, "read the new password from standard input")
+	return c
+}
+
+// readNewPassword reads a new board password from standard input, or twice from the terminal.
+func readNewPassword(stdin bool) (string, error) {
+	if stdin {
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		pw := strings.TrimRight(line, "\r\n")
+		return pw, core.ValidBoardPassword(pw)
+	}
+	pw, ok, err := tty{}.Secret(context.Background(), "New password", "New password for the board:")
+	if err != nil || !ok {
+		return "", orCanceled(err)
+	}
+	if err := core.ValidBoardPassword(pw); err != nil {
+		return "", err
+	}
+	again, ok, err := tty{}.Secret(context.Background(), "New password", "Again:")
+	if err != nil || !ok {
+		return "", orCanceled(err)
+	}
+	if again != pw {
+		return "", errors.New("the two passwords differ")
+	}
+	return pw, nil
+}
+
+func orCanceled(err error) error {
+	if err != nil {
+		return err
+	}
+	return context.Canceled
+}
+
+// rememberSkipDesktop saves the choice for the saved board t is (a board reached ad hoc is not).
+func rememberSkipDesktop(t board.Target, skip bool) {
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	b, ok := cfg.ByBoardID(t.BoardID)
+	if !ok || t.BoardID == "" {
+		if b, ok = cfg.Board(t.Name); !ok {
+			return
+		}
+	}
+	if b.SkipDesktop != skip {
+		b.SkipDesktop = skip
+		cfg.Put(b)
+		_ = cfg.Save()
+	}
+}
+
 func upgradeCmd() *cobra.Command {
-	var check, arduinoOnly, skipDesktop, yes, force, noRefresh, downloadOnly bool
+	var check, arduinoOnly, skipDesktop, withDesktop, yes, force, noRefresh, downloadOnly bool
 	c := &cobra.Command{
 		Use:   "upgrade",
-		Short: "Update the board's system packages (the update App Lab runs)",
+		Short: "Update the board's system packages",
 		Long: "Lists the pending updates of the board's Debian and Arduino packages, then installs them with\n" +
-			"the board's own `arduino-app-cli system update` — the update App Lab runs. The job keeps running\n" +
-			"on the board if the connection drops; running quay upgrade again follows it.\n\n" +
+			"the board's own `arduino-app-cli system update`. --arduino-only is the update App Lab runs: the\n" +
+			"arduino-* packages. Everything goes in two rounds, App Lab's packages first, so the apt rules they\n" +
+			"bring (Arduino's pins) already decide the rest. The job keeps running on the board if the\n" +
+			"connection drops; running quay upgrade again follows it.\n\n" +
 			"Faster: `quay mirror cn` moves the Debian downloads to a mirror, `quay relay on` sends the board's\n" +
 			"downloads through this computer, and --skip-desktop leaves out the on-board App Lab and Chromium,\n" +
-			"which a board used from a computer does not need.\n\n" +
+			"which a board used from a computer does not need. Quay remembers that for the board: later\n" +
+			"updates leave them out too, until --with-desktop brings them back.\n\n" +
 			"Quay first downloads the packages into the board's cache, then installs them. --download-only\n" +
 			"stops after the download (running apps are not touched); a later quay upgrade installs them\n" +
 			"without downloading again.",
 		Example: "  quay upgrade --check\n  quay upgrade --skip-desktop\n  quay upgrade --download-only\n  quay upgrade --arduino-only --yes",
 		Args:    cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if skipDesktop && withDesktop {
+				return errors.New("--skip-desktop and --with-desktop contradict each other")
+			}
 			return withSession(func(ctx context.Context, s *core.Session, sink core.Sink) error {
+				// The board's remembered choice, unless a flag makes (and remembers) another.
+				if cmd.Flags().Changed("skip-desktop") || withDesktop {
+					rememberSkipDesktop(s.Target, skipDesktop)
+				} else {
+					skipDesktop = s.Target.SkipDesktop
+				}
 				relayIfInstalled(ctx, s)
 				u, err := s.CheckUpgrades(ctx, sink, !noRefresh)
 				if err != nil {
@@ -1066,11 +1239,45 @@ func upgradeCmd() *cobra.Command {
 						return errors.New("cancelled")
 					}
 				}
-				res, err := s.Upgrade(ctx, sink, core.UpgradeOptions{ArduinoOnly: arduinoOnly, SkipDesktop: skipDesktop, Force: force, DownloadOnly: downloadOnly})
+				opt := core.UpgradeOptions{ArduinoOnly: arduinoOnly, SkipDesktop: skipDesktop, Force: force, DownloadOnly: downloadOnly}
+				res, err := s.Upgrade(ctx, sink, opt)
 				if err != nil {
 					return err
 				}
 				sink(core.Event{Type: "noop"})
+				// The update changed apt's version rules, which change more packages: asked, not done.
+				if res.Rules != nil && !flagJSON {
+					fmt.Println(yellow("! ") + "The update changed apt's version rules:")
+					for _, f := range res.Rules.Files {
+						if f.Package != "" {
+							fmt.Printf("    %s %s\n", f.Path, dim("(from "+f.Package+")"))
+						} else {
+							fmt.Println("    " + f.Path)
+						}
+					}
+					fmt.Println("  Under them, these packages change too:")
+					for _, p := range res.Rules.Packages {
+						line := fmt.Sprintf("    %s %s → %s", p.Name, p.From, p.To)
+						if p.Downgrade {
+							line += yellow("  downgrade")
+						}
+						fmt.Println(line)
+					}
+					again := yes
+					if !again {
+						ans, err := ask("Install them now? [y/N] ")
+						if err != nil {
+							return err
+						}
+						again = strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes")
+					}
+					if !again {
+						fmt.Println(dim("left as they are; quay upgrade installs them later"))
+					} else if res, err = s.Upgrade(ctx, sink, opt); err != nil {
+						return err
+					}
+					sink(core.Event{Type: "noop"})
+				}
 				if !flagJSON && res.Downloaded {
 					fmt.Println(green("downloaded") + " — run quay upgrade again to install")
 				} else if !flagJSON {
@@ -1085,8 +1292,9 @@ func upgradeCmd() *cobra.Command {
 		},
 	}
 	c.Flags().BoolVar(&check, "check", false, "only list the updates")
-	c.Flags().BoolVar(&arduinoOnly, "arduino-only", false, "only Arduino's packages (App CLI, router, …)")
-	c.Flags().BoolVar(&skipDesktop, "skip-desktop", false, "leave out the on-board App Lab and Chromium")
+	c.Flags().BoolVar(&arduinoOnly, "arduino-only", false, "only Arduino's packages, as App Lab's update (arduino-*: App CLI, router, …)")
+	c.Flags().BoolVar(&skipDesktop, "skip-desktop", false, "leave out the on-board App Lab and Chromium, now and in later updates of this board")
+	c.Flags().BoolVar(&withDesktop, "with-desktop", false, "include the on-board desktop again (undoes --skip-desktop for this board)")
 	c.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask for confirmation")
 	c.Flags().BoolVar(&force, "force", false, "ignore the running apps' safety checks")
 	c.Flags().BoolVar(&noRefresh, "no-refresh", false, "use the package lists as they are (no apt-get update)")
@@ -1116,20 +1324,12 @@ func printUpgrades(u *core.Upgrades, opt core.UpgradeOptions) {
 	if u.Desktop.Count > 0 {
 		hint := "--skip-desktop leaves them out"
 		if opt.SkipDesktop {
-			hint = "left out"
+			hint = "left out for this board; --with-desktop brings them back"
 		}
 		fmt.Printf("  Desktop (App Lab, Chromium): %d packages, %s  %s\n", u.Desktop.Count, mb(u.Desktop.Size), dim(hint))
 	}
-	if opt.ArduinoOnly || opt.SkipDesktop {
-		n, size := 0, int64(0)
-		for _, p := range u.Packages {
-			if (opt.ArduinoOnly && !p.Arduino) || (opt.SkipDesktop && p.Desktop) {
-				continue
-			}
-			n++
-			size += p.Size
-		}
-		fmt.Printf("  to install: %d packages, %s\n", n, mb(size))
+	if p := u.Plans[opt.PlanKey()]; p != nil && (opt.ArduinoOnly || opt.SkipDesktop) {
+		fmt.Printf("  to install: %d packages, %s\n", p.Count, mb(p.Size))
 	}
 	if len(u.Running) > 0 {
 		fmt.Println(yellow("  running apps may restart: ") + strings.Join(u.Running, ", "))
@@ -1377,15 +1577,31 @@ func licensesCmd() *cobra.Command {
 
 func profilesCmd() *cobra.Command {
 	var refresh bool
+	var auto string
 	c := &cobra.Command{
 		Use:   "profiles",
 		Short: "List Quay's app and system profiles (from the quay-profiles repository)",
 		Long: "App profiles tell Quay what an app needs when the app has no quay.yaml of its own; system profiles\n" +
 			"recognise board systems other than the stock image (Duck OS, …) and what they do differently.\n" +
 			"Both come from github.com/caoxg/quay-profiles, independently of Quay releases: Quay has a copy\n" +
-			"built in and fetches a newer one about twice a day. --refresh fetches now.",
-		Args: cobra.NoArgs,
+			"built in and fetches a newer one about twice a day (--auto off: only when asked). --refresh\n" +
+			"fetches now.",
+		Example: "  quay profiles\n  quay profiles --refresh\n  quay profiles --auto off",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Flags().Changed("auto") {
+				if auto != "on" && auto != "off" {
+					return errors.New("--auto on or --auto off")
+				}
+				cfg, err := config.Load()
+				if err != nil {
+					return err
+				}
+				cfg.ProfilesManual = auto == "off"
+				if err := cfg.Save(); err != nil {
+					return err
+				}
+			}
 			if refresh {
 				ctx, cancel := signalContext()
 				defer cancel()
@@ -1394,7 +1610,11 @@ func profilesCmd() *cobra.Command {
 				}
 			}
 			snap := hub.Get()
-			fmt.Println(dim("profiles of " + snap.Index.Updated + ", " + snap.Source))
+			how := "fetched by themselves about twice a day"
+			if profilesManual() {
+				how = "fetched only when asked (quay profiles --refresh)"
+			}
+			fmt.Println(dim("profiles of " + snap.Index.Updated + ", " + snap.Source + "; " + how))
 			fmt.Println(bold("App profiles"))
 			for _, p := range profile.Builtins() {
 				fmt.Printf("  %s  %s\n", bold(p.Name), dim("("+p.ID+")"))
@@ -1423,7 +1643,14 @@ func profilesCmd() *cobra.Command {
 		},
 	}
 	c.Flags().BoolVar(&refresh, "refresh", false, "fetch the newest profiles first")
+	c.Flags().StringVar(&auto, "auto", "", "on: fetch newer profiles by themselves (the default); off: only when asked")
 	return c
+}
+
+// profilesManual is the setting that stops Quay fetching newer profiles by itself.
+func profilesManual() bool {
+	cfg, err := config.Load()
+	return err == nil && cfg.ProfilesManual
 }
 
 func systemCmd() *cobra.Command {

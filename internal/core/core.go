@@ -11,11 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/caoxg/quay/internal/applog"
 	"github.com/caoxg/quay/internal/board"
 	"github.com/caoxg/quay/internal/remote"
 )
@@ -23,7 +26,7 @@ import (
 // Event is one progress report.
 type Event struct {
 	Op    string `json:"op,omitempty"`    // set by the caller (GUI operation id)
-	Type  string `json:"type"`            // step | log | warn | info
+	Type  string `json:"type"`            // step | log | warn | info | progress | debug (Quay's log only)
 	Step  string `json:"step,omitempty"`  // stable key, e.g. "upload"
 	State string `json:"state,omitempty"` // run | ok | fail | skip (steps)
 	Text  string `json:"text,omitempty"`
@@ -34,6 +37,18 @@ type Event struct {
 // Sink receives events. It must be safe to call from several goroutines.
 type Sink func(Event)
 
+// Record writes e to Quay's log (applog) under tag, which names the operation. Progress ticks stay
+// out, and so does the data the screens draw from.
+func Record(tag string, e Event) {
+	switch e.Type {
+	case "progress", "noop", "":
+	case "step":
+		applog.Default.Printf("%s step %s %s: %s", tag, e.Step, e.State, e.Text)
+	default:
+		applog.Default.Printf("%s %s: %s", tag, e.Type, e.Text)
+	}
+}
+
 // Session is a connection to one board.
 type Session struct {
 	T      board.Transport
@@ -43,6 +58,7 @@ type Session struct {
 	mu        sync.Mutex
 	sudoPass  string
 	relayStop func() // set while StartRelay forwards the board's relay port
+	relayGen  int    // counts StartRelay's forwards, so one that ends knows whether it is current
 }
 
 // Connect opens a session.
@@ -151,24 +167,45 @@ func (o *op) run(script string, filter func(string) bool) (string, error) {
 			msg = lastLine(out.String())
 		}
 		if msg != "" {
-			return out.String(), errors.New(msg)
+			return out.String(), &runError{msg: msg, err: err}
 		}
 		return out.String(), err
 	}
 	return out.String(), nil
 }
 
-// quiet runs a user script without streaming.
-func (o *op) quiet(script string) (string, error) {
-	return board.Output(o.ctx, o.s.T, script)
+// runError says what a failed script printed last, and keeps why it failed (a dropped connection,
+// an exit status) for errors.Is/As and dropped.
+type runError struct {
+	msg string
+	err error
 }
 
-func lastLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
-		s = s[i+1:]
+func (e *runError) Error() string { return e.msg }
+func (e *runError) Unwrap() error { return e.err }
+
+// quiet runs a user script without streaming. Its callers often take a failure as an answer, so a
+// failure also goes out as a "debug" event, for Quay's log only: a script that broke looks the same.
+func (o *op) quiet(script string) (string, error) {
+	out, err := board.Output(o.ctx, o.s.T, script)
+	if err != nil && o.ctx.Err() == nil {
+		_, file, line, _ := runtime.Caller(1)
+		o.emit(Event{Type: "debug", Text: fmt.Sprintf("a background script (%s:%d) failed: %v", filepath.Base(file), line, err)})
 	}
-	return strings.TrimSpace(s)
+	return out, err
+}
+
+// lastLine is the last line of s that says something: apt's machine-readable status lines
+// (dlstatus:, pmstatus: from APT::Status-Fd) are progress, not what went wrong.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l != "" && !strings.HasPrefix(l, "dlstatus:") && !strings.HasPrefix(l, "pmstatus:") {
+			return l
+		}
+	}
+	return ""
 }
 
 func randHex(n int) string {

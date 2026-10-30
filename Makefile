@@ -111,9 +111,15 @@ clis:
 licenses:
 	bash build/licenses.sh
 
+# SHA256SUMS, signed with the release key (build/sign: $$QUAY_SIGNING_KEY or
+# ~/.config/quay/release-signing.key). Quay's self-update installs nothing unsigned.
 checksums:
-	cd dist && rm -f SHA256SUMS && shasum -a 256 $$(ls | grep -E '\.(zip|dmg|tar\.gz|deb)$$|^quay-cli-') > SHA256SUMS
-	@echo "wrote dist/SHA256SUMS"
+	cd dist && rm -f SHA256SUMS SHA256SUMS.sig && shasum -a 256 $$(ls | grep -E '\.(zip|dmg|tar\.gz|deb)$$|^quay-cli-') > SHA256SUMS
+	go run ./build/sign sign dist/SHA256SUMS
+	@echo "wrote dist/SHA256SUMS and its signature"
+
+# The notes every release ends with (the macOS first-launch steps, until Quay is signed):
+#   gh release create vX.Y.Z dist/* --notes-file <(cat my-notes.md build/release-notes-footer.md)
 
 ifeq ($(GOOS),darwin)
 release: clean licenses mac windows linux clis checksums

@@ -8,6 +8,8 @@ package relay
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,19 +19,30 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	xproxy "golang.org/x/net/proxy"
 )
 
 // Port is the port on the board's loopback that leads to the relay.
 const Port = 18765
 
+// ProbeHost is the host of the request the board's apt hook sends before using the relay port:
+// only Quay's relay answers it with 200. A port held by anything else (a connection an earlier Quay
+// left behind, which the board's sshd has not noticed yet) is not used, and apt downloads directly.
+const ProbeHost = "quay-relay.invalid"
+
 // Proxy is a small forward HTTP proxy: CONNECT for https, absolute-URI requests for plain http.
 type Proxy struct {
-	Upstream     *url.URL // optional HTTP proxy to chain through; nil connects directly
+	Upstream     *url.URL // optional proxy to chain through (http, https, socks5, socks5h); nil connects directly
 	AllowAnyPort bool     // by default only ports 80 and 443 can be reached
 	once         sync.Once
 	transport    *http.Transport
 	dialer       net.Dialer
+	upTLS        *tls.Config // for an https upstream; nil verifies it the usual way (tests set it)
 }
+
+// upstreamSchemes are the proxies the relay can chain through.
+var upstreamSchemes = map[string]bool{"http": true, "https": true, "socks5": true, "socks5h": true}
 
 // Serve accepts connections on ln until it is closed.
 func (p *Proxy) Serve(ln net.Listener) error {
@@ -37,9 +50,40 @@ func (p *Proxy) Serve(ln net.Listener) error {
 	return srv.Serve(ln)
 }
 
+// ServeBridged is Serve for a listener whose connections have no deadlines, like a port forwarded
+// over SSH: net/http's Hijack, which CONNECT needs, waits forever on such a connection, so https
+// would hang while plain http works. Each connection reaches the proxy through a loopback TCP
+// connection instead.
+func (p *Proxy) ServeBridged(ln net.Listener) error {
+	local, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	defer local.Close()
+	go func() { _ = p.Serve(local) }()
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return err
+		}
+		go func() {
+			l, err := net.Dial("tcp", local.Addr().String())
+			if err != nil {
+				c.Close()
+				return
+			}
+			pipe(c, l)
+		}()
+	}
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		p.connect(w, r)
+		return
+	}
+	if r.URL.Host == ProbeHost {
+		_, _ = io.WriteString(w, "quay-relay\n")
 		return
 	}
 	if !r.URL.IsAbs() || (r.URL.Scheme != "http" && r.URL.Scheme != "https") {
@@ -133,13 +177,43 @@ func (p *Proxy) dial(ctx context.Context, hostport string) (net.Conn, error) {
 	if p.Upstream == nil {
 		return p.dialer.DialContext(ctx, "tcp", hostport)
 	}
+	if strings.HasPrefix(p.Upstream.Scheme, "socks5") {
+		d, err := xproxy.FromURL(p.Upstream, &p.dialer)
+		if err != nil {
+			return nil, err
+		}
+		c, err := d.(xproxy.ContextDialer).DialContext(ctx, "tcp", hostport)
+		if err != nil {
+			return nil, fmt.Errorf("upstream proxy %s: %w", p.Upstream.Host, err)
+		}
+		return c, nil
+	}
 	addr := p.Upstream.Host
 	if p.Upstream.Port() == "" {
-		addr = net.JoinHostPort(p.Upstream.Hostname(), "80")
+		port := "80"
+		if p.Upstream.Scheme == "https" {
+			port = "443"
+		}
+		addr = net.JoinHostPort(p.Upstream.Hostname(), port)
 	}
 	c, err := p.dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("upstream proxy %s: %w", p.Upstream.Host, err)
+	}
+	if p.Upstream.Scheme == "https" {
+		cfg := &tls.Config{}
+		if p.upTLS != nil {
+			cfg = p.upTLS.Clone()
+		}
+		if cfg.ServerName == "" {
+			cfg.ServerName = p.Upstream.Hostname()
+		}
+		tc := tls.Client(c, cfg)
+		if err := tc.HandshakeContext(ctx); err != nil {
+			c.Close()
+			return nil, fmt.Errorf("upstream proxy %s: %w", p.Upstream.Host, err)
+		}
+		c = tc
 	}
 	req := &http.Request{Method: http.MethodConnect, URL: &url.URL{Opaque: hostport}, Host: hostport, Header: http.Header{}}
 	if u := p.Upstream.User; u != nil {
@@ -183,11 +257,68 @@ func (p *Proxy) roundTripper() http.RoundTripper {
 		p.transport = &http.Transport{
 			Proxy:                 http.ProxyURL(p.Upstream),
 			DialContext:           p.dialer.DialContext,
+			TLSClientConfig:       p.upTLS,
 			ResponseHeaderTimeout: 60 * time.Second,
 			IdleConnTimeout:       90 * time.Second,
 		}
 	})
 	return p.transport
+}
+
+// CheckURL is fetched through a proxy to see that it really forwards: the relay is there for
+// Arduino's package repository.
+var CheckURL = "https://apt-repo.arduino.cc/dists/stable/InRelease"
+
+// Check tries a proxy address typed by the user (host:port, or a URL with http, https, socks5 or
+// socks5h; empty means the system settings and is not tried). problem is "" when it works, else
+// format, scheme, port (none given), unreachable (nothing answers there on this computer), notTLS
+// (https:// written for a plain proxy; detail is the http:// address to use) or forward (it answers
+// but does not fetch CheckURL); detail is the part concerned.
+func Check(s string) (problem, detail string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", ""
+	}
+	if !strings.Contains(s, "://") {
+		s = "http://" + s
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Hostname() == "" {
+		return "format", s
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "http", "https", "socks", "socks5": // a scheme typed on its own
+		return "format", s
+	}
+	if !upstreamSchemes[u.Scheme] {
+		return "scheme", u.Scheme
+	}
+	if u.Port() == "" {
+		return "port", u.Hostname()
+	}
+	c, err := net.DialTimeout("tcp", u.Host, 2*time.Second)
+	if err != nil {
+		return "unreachable", u.Host
+	}
+	c.Close()
+	cl := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: http.ProxyURL(u)}}
+	resp, err := cl.Head(CheckURL)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		var rh tls.RecordHeaderError
+		if u.Scheme == "https" && errors.As(err, &rh) { // a plain proxy (Clash, …) written as https://
+			return "notTLS", "http://" + u.Host
+		}
+		return "forward", u.Host + ": " + err.Error()
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return "forward", fmt.Sprintf("%s: HTTP %d", u.Host, resp.StatusCode)
+	}
+	return "", ""
 }
 
 // Upstream picks the proxy the relay chains through: the explicit setting, else HTTPS_PROXY /
@@ -205,8 +336,8 @@ func Upstream(explicit string) (*url.URL, error) {
 		if err != nil || u.Host == "" {
 			return nil, fmt.Errorf("bad proxy address %q", s)
 		}
-		if u.Scheme != "http" {
-			return nil, fmt.Errorf("the relay can chain through an HTTP proxy only, not %s", u.Scheme)
+		if !upstreamSchemes[u.Scheme] {
+			return nil, fmt.Errorf("the relay can chain through an http, https or socks5 proxy, not %s", u.Scheme)
 		}
 		return u, nil
 	}

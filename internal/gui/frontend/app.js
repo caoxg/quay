@@ -8,10 +8,13 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const short = (c) => (c || '').slice(0, 7);
 const repoLabel = (u) => (u || '').startsWith('local:') ? u.slice(6) : (u || '').replace(/^https?:\/\//, '').replace(/^git@/, '').replace(/\.git$/, '');
+// A repository's web page, from an https:// or git@host: address ('' for anything else).
+const repoWeb = (u) => { const m = (u || '').match(/^(?:https?:\/\/|git@)([^/:]+)[/:](.+?)(?:\.git)?\/?$/); return m ? `https://${m[1]}/${m[2]}` : ''; };
 const keyOf = (b, f) => `${b}/${f || ''}`;
 const when = (iso) => (iso ? relTime(Date.parse(iso)) : '');
 const plural = (n, word) => `${n} ${word}`;
-const mb = (n) => `${Math.round((n || 0) / 1048576).toLocaleString()} MB`;
+// Under a megabyte in KB, as the backend's sizes: a 92 KB package is not "0 MB".
+const mb = (n) => (n > 0 && n < 1023.5 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${Math.round((n || 0) / 1048576).toLocaleString()} MB`);
 // A board's name is its hostname: one DNS label, also its network name NAME.local.
 const HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const mirrorOn = (d) => !!(d?.mirror?.managed || d?.mirror?.pip || (d?.mirror?.debian && !/deb\.debian\.org/.test(d.mirror.debian)));
@@ -27,14 +30,14 @@ const keyOn = (st) => !!(S.info?.publicKey && st?.authorizedKeys?.includes(S.inf
 // ---------------------------------------------------------------- state
 const S = {
   info: null, boards: [], def: '', cur: null,
-  status: {}, updates: {}, sys: {},
+  status: {}, updates: {}, sys: {}, keyChoice: {},
   ops: [], opMap: new Map(), busy: {}, activity: false,
   modals: [], menu: null,
 };
 const SHOT = isMock && new URLSearchParams(location.search).has('shot'); // README screenshots (build/screenshots.py)
 if (isMock) window.__quay = { S, get modals() { return S.modals.map((m) => m.type); } };
 if (new URLSearchParams(location.search).has('noanim')) document.head.insertAdjacentHTML('beforeend', '<style>*,*::before,*::after{animation:none!important;transition:none!important}</style>');
-const VISIBLE = new Set(['deploy', 'update', 'start', 'stop', 'restart', 'autostart', 'prepare', 'revert', 'mirror', 'backup', 'restore', 'export', 'erase', 'rename', 'sysupdate', 'relay', 'uploadkey', 'policy', 'policyrestore', 'wifi', 'hotspot', 'away', 'sysfix']);
+const VISIBLE = new Set(['deploy', 'update', 'start', 'stop', 'restart', 'autostart', 'prepare', 'revert', 'mirror', 'backup', 'restore', 'export', 'erase', 'rename', 'passwd', 'firstsetup', 'sysupdate', 'relay', 'uploadkey', 'policy', 'policyrestore', 'wifi', 'hotspot', 'away', 'sysfix', 'selfupdate']);
 
 // ---------------------------------------------------------------- rendering scheduler
 const dirty = new Set();
@@ -134,7 +137,7 @@ function trackOp(e) {
     case 'step': {
       const last = [...o.steps].reverse().find((s) => s.key === e.step);
       if (last && last.state === 'run') { last.state = e.state; if (e.state === 'fail' || e.state === 'ok') last.text = e.text || last.text; }
-      else o.steps.push({ key: e.step, state: e.state, text: e.text });
+      else o.steps.push({ key: e.step, state: e.state, text: e.text, logFrom: o.logCount || 0 });
       invalidate('main');
       break;
     }
@@ -145,9 +148,9 @@ function trackOp(e) {
       invalidate('main');
       break;
     }
-    case 'log': o.logs.push(e.text); if (o.logs.length > 3000) o.logs.splice(0, o.logs.length - 3000); break;
+    case 'log': o.logs.push(e.text); o.logCount = (o.logCount || 0) + 1; if (o.logs.length > 3000) o.logs.splice(0, o.logs.length - 3000); break;
     case 'warn': o.notes.push({ kind: 'warn', text: e.text }); break;
-    case 'info': if (e.text && !e.text.startsWith('saved ')) o.notes.push({ kind: 'info', text: e.text }); break;
+    case 'info': if (e.text && !e.text.startsWith('saved ')) o.notes.push({ kind: 'info', text: e.data?.note && has('n_' + e.data.note) ? t('n_' + e.data.note) : e.text }); break;
     case 'end':
       o.state = e.state; o.error = e.error; o.result = e.result; o.ended = e.time || Date.now();
       if (o.state === 'fail') { o.open = true; o.showLog = o.logs.length > 0; }
@@ -207,28 +210,50 @@ async function refresh(name = S.cur) {
     st.data = res;
     st.error = null;
     checkUpdates(name, st.data.apps || []);
-    if (!S.sys[name]) loadSystem(name);
+    // What a check found holds for one boot of one board and one set of package sources: a restart,
+    // or a re-flash, can change it all, and a mirror switch leaves apt without lists until refreshed.
+    const sys = S.sys[name];
+    if (sys?.data && !sys.loading && (sys.boot !== res.bootId || sys.serial !== res.serial || sys.sources !== aptSources(res))) delete S.sys[name];
+    if (!S.sys[name]) loadSystem(name, 'auto');
   } catch (e) {
+    // Saved under another name by now: an operation on the board followed its new hostname (a first
+    // setup renames it). Show the board under that name rather than an error about the old one.
+    if (!e.cancelled && /^no saved board /.test(e.message || '')) {
+      delete S.status[name];
+      await loadBoards();
+      renderAll();
+      if (S.cur && S.cur !== name) refresh(S.cur);
+      return;
+    }
     if (!e.cancelled) { st.error = e.message; st.data = null; }
   } finally {
     st.loading = false; st.connecting = false;
     invalidate('main', 'sidebar');
   }
 }
+// aptSources names where the board's apt gets Debian packages, as its status reports it.
+const aptSources = (d) => [d?.mirror?.debian || '', ...(d?.mirror?.debianFallback || [])].join(' ');
 // loadSystem lists the board's pending system updates (refresh: run apt-get update first).
 async function loadSystem(name, refresh = false, onEvent) {
   const s = (S.sys[name] ||= {});
   if (s.loading) return s.data;
   s.loading = true; s.error = null;
+  s.boot = S.status[name]?.data?.bootId; s.serial = S.status[name]?.data?.serial; s.sources = aptSources(S.status[name]?.data); // see refresh
   invalidate('main', 'modal');
-  try { s.data = await runOp(call('SystemCheck', name, refresh), onEvent); } catch (e) { if (!e.cancelled) s.error = e.message || String(e); } finally { s.loading = false; invalidate('main', 'modal'); }
+  // The step running now, for the card: refreshing the lists can take a minute or two.
+  const ev = (e) => { if (e.type === 'step' && e.state === 'run') { s.step = has('s_' + e.step) ? t('s_' + e.step) : e.text; invalidate('main'); } onEvent?.(e); };
+  // 'auto' (the board page): stale lists are refreshed only where no password is needed.
+  try { s.data = await runOp(refresh === 'auto' ? call('SystemCheckAuto', name) : call('SystemCheck', name, refresh), ev); } catch (e) { if (!e.cancelled) s.error = e.message || String(e); } finally { s.loading = false; s.step = ''; invalidate('main', 'modal'); }
+  // The sources changed while it ran (a mirror switch): what it found mixes the old and the new.
+  if (s.data && S.sys[name] === s && s.sources !== aptSources(S.status[name]?.data)) { delete S.sys[name]; return loadSystem(name, 'auto', onEvent); }
   return s.data;
 }
 
 // renameLocal follows a board rename (by Quay, or noticed in the board's status).
 function renameLocal(old, nw) {
   if (!old || !nw || old === nw) return;
-  for (const m of [S.status, S.updates, S.sys]) if (m[old]) { m[nw] = m[old]; delete m[old]; }
+  // What was known under the new name belonged to another board (or an earlier flash of this one).
+  for (const m of [S.status, S.updates, S.sys]) { const v = m[old]; delete m[old]; if (v) m[nw] = v; else delete m[nw]; }
   S.ops.forEach((o) => { if (o.board === old) o.board = nw; });
   if (S.cur === old) S.cur = nw;
   loadBoards().then(() => renderAll());
@@ -262,7 +287,9 @@ function renderSidebar() {
       <button class="add-board" data-act="add-board">${icon('plus')} ${t('addBoard')}</button>
     </div>
     <div class="side-foot">
+      <button class="side-link" data-act="settings">${icon('sliders')} ${t('settings')}</button>
       <button class="side-link" data-act="reveal-backups">${icon('archive')} ${t('backupsFolder')}</button>
+      ${S.update?.available && !SHOT ? `<button class="update-pill" data-act="selfupdate">${icon('download', 'sm')} ${esc(t('updNew', { v: S.update.latest.version }))}<span class="reddot"></span></button>` : ''}
       <div class="ver"><button class="ver-link" data-act="about" title="${esc(t('about'))}">Quay${SHOT ? '' : ` ${esc(S.info?.version || '')}${isMock ? ' · preview' : ''}`}</button>
         <span class="seg-mini"><button class="${lang() === 'en' ? 'on' : ''}" data-act="lang" data-lang="en">EN</button><button class="${lang() === 'zh' ? 'on' : ''}" data-act="lang" data-lang="zh">中</button></span></div>
     </div>`;
@@ -308,7 +335,7 @@ function welcome() {
   return `<div class="empty welcome">
     <div class="art">${icon('anchor')}</div>
     <h3>${t('welcomeTitle')}</h3><p>${t('welcomeText')}</p>
-    <div class="actions"><button class="btn primary" data-act="add-board">${icon('wifi')} ${t('addSSH')}</button><button class="btn" data-act="add-board" data-mode="usb">${icon('usb')} ${t('addUSB')}</button></div>
+    <div class="actions"><button class="btn primary" data-act="add-board">${icon('plus')} ${t('addBoard')}</button></div>
     <div class="steps-hint">
       <div><span class="n">1</span><b>${t('welcomeStep1')}</b>${t('welcomeStep1d')}</div>
       <div><span class="n">2</span><b>${t('welcomeStep2')}</b>${t('welcomeStep2d')}</div>
@@ -332,8 +359,14 @@ function findingHtml(f, busy) {
   const a = f.action;
   return `<div class="callout warn finding">${icon('info')}<div class="grow">${esc(zhOr(f.text, f.textZh))}</div>${a ? `<button class="btn sm" data-act="sys-fix" data-id="${esc(f.id)}" ${busy ? 'disabled' : ''}>${esc(zhOr(a.label, a.labelZh))}</button>` : ''}</div>`;
 }
+// setupNeeded: the board never had its first setup (App Lab's, or Quay's over USB).
+const setupNeeded = (d) => !!d?.setup && (!d.setup.sshActive || d.setup.password === 'L' || d.setup.password === 'NP');
 function warnings(d) {
   let h = (d.findings || []).map((f) => findingHtml(f)).join('');
+  if (setupNeeded(d)) {
+    const what = [d.setup.sshActive ? '' : t('fsNoSSH'), d.setup.password === 'L' || d.setup.password === 'NP' ? t('fsNoPw') : ''].filter(Boolean).join(t('listSep'));
+    h += `<div class="callout info" style="margin:6px 0 14px">${icon('info')}<div class="grow">${esc(t('fsCallout', { what }))}</div><button class="btn sm primary" data-act="first-setup">${t('fsMenu')}</button></div>`;
+  }
   if (!d.appcli) h += `<div class="callout warn" style="margin:6px 0 14px">${icon('alert')}<div class="grow">${t('noAppCLI')}</div></div>`;
   else if (!d.isUnoQ) h += `<div class="callout warn" style="margin:6px 0 14px">${icon('info')}<div class="grow">${t('notUnoQ')}</div></div>`;
   return h;
@@ -357,27 +390,31 @@ function overview(d) {
   const baseS = d.system ? [d.system.base ? t('sysBase', { v: d.system.base }) : '', osName].filter(Boolean).join(' · ') : '';
   let sysV = esc(sysName || osName || cli || '✓'), sysS = [baseS, cliS, t('sysCheck')].filter(Boolean).join(' · '), sysDot = '';
   if (!d.appcli) { sysV = esc(osName) || `<span style="color:var(--danger)">${t('notFound')}</span>`; sysS = `App CLI ${t('notFound')}`; }
+  const plan = u ? sysPlan(u, !!board(S.cur)?.skipDesktop, false) : null;
   const sysOp = S.ops.find((o) => o.kind === 'sysupdate' && o.board === S.cur && o.state === 'run');
   if (sysOp) {
     const st = [...sysOp.steps].reverse().find((x) => x.state === 'run');
     const p = sysOp.progress?.step === st?.key ? sysOp.progress : null;
     sysS = `<b class="accent-text">${esc(st ? stepLabel(st) : t('running'))}${p ? ' · ' + esc(progressText(p)) : ''}</b>` + (p ? progressBar(p) : '');
-  } else if (sys.loading && !u) sysS = [baseS, cliS, t('sysChecking')].filter(Boolean).join(' · ');
-  else if (u?.total?.count) { sysS = `${[baseS, cliS].filter(Boolean).join(' · ')} · <b class="accent-text">${esc(t('sysUpdates', { n: u.total.count }))} · ${mb(u.total.size)}</b>`; sysDot = '<span class="reddot"></span>'; }
-  else if (u) sysS = `${[baseS, cliS].filter(Boolean).join(' · ')} · ${t('sysUpToDate')}`;
+  } else if (sys.loading && !u) sysS = [baseS, cliS, sys.step ? sys.step + '…' : t('sysChecking')].filter(Boolean).join(' · ');
+  // The update count first: the card has two lines at most, and this is the part to act on.
+  // Counted as this board's updates install them: skipped desktop updates make no red dot.
+  else if (plan?.count) { sysS = `<b class="accent-text">${esc(t('sysUpdates', { n: plan.count }))} · ${mb(plan.size)}</b> · ${[baseS, cliS].filter(Boolean).join(' · ')}`; sysDot = '<span class="reddot"></span>'; }
+  else if (u?.listsStale) { sysS = `<b class="accent-text">${esc(t('sysStale'))}</b> · ${[baseS, cliS].filter(Boolean).join(' · ')}`; sysDot = '<span class="reddot"></span>'; }
+  else if (u) sysS = `${[baseS, cliS].filter(Boolean).join(' · ')} · ${esc(plan.skipped ? t('sysUpToDateSkipped', { n: plan.skipped }) : t('sysUpToDate'))}`;
   const relay = d.relay || {};
   const ri = S.relayInfo || {};
   const busy = busyOp(S.cur, undefined) ? 'disabled' : '';
   return `<section class="overview">
     <div class="stat"><div class="k">${icon('cpu', 'sm')} ${t('model')}</div><div class="v" title="${esc(d.model)}">${esc(d.model || '—')}</div><div class="s">${esc(d.hostname)}${d.serial ? ' · ' + esc(t('serial', { s: d.serial })) : ''}</div></div>
-    <div class="stat click" data-act="network" title="${esc(t('netSettings'))}"><div class="k">${icon('globe', 'sm')} ${t('network')}</div><div class="v mono">${esc(ip?.ip || t('noIP'))}</div><div class="s">${esc(netLine(d.net) || [ip?.iface, otherIPs].filter(Boolean).join(' · '))}</div></div>
+    <div class="stat click" data-act="network" title="${esc(t('netSettings'))}"><div class="k">${icon('globe', 'sm')} ${t('network')}</div><div class="v mono">${esc(ip?.ip || t('noIP'))}</div><div class="s">${netLine(d.net) || esc([ip?.iface, otherIPs].filter(Boolean).join(' · '))}</div></div>
     <div class="stat click" data-act="system" title="${esc(t('systemUpdate'))}"><div class="k">${icon('package', 'sm')} ${t('sysTitle')}${sysDot}${sys.loading ? ` ${icon('spinner', 'sm spin')}` : ''}</div><div class="v" title="${esc(d.os?.pretty || '')}">${sysV}</div><div class="s">${sysS}</div></div>
     <div class="stat toggle"><div class="k">${icon('download', 'sm')} ${t('mirror')}${helpQ('mirror')}</div>
       <div class="row"><div class="v">${mOn ? t('mirrorOn') : t('mirrorOff')}</div><button class="btn sm ghost speed-btn" data-act="mirror-test" ${busy} title="${esc(t('mirrorTestHelp'))}">${icon('activity', 'sm')} ${t('mirrorSpeedTest')}</button><button class="switch ${mOn ? 'on' : ''}" data-act="mirror" ${busy}></button></div>
       <div class="s">${mOn ? `<a class="link" data-act="mirror-info" title="${esc(t('mirrorDetails'))}">${esc(mirrorHosts)}</a>` : esc('pypi.org · deb.debian.org')}</div></div>
     <div class="stat toggle"><div class="k">${icon('link', 'sm')} ${t('relayCard')}${helpQ('relay')}</div>
       <div class="row"><div class="v">${relay.installed ? t('mirrorOn') : t('relayOff')}</div><button class="switch ${relay.installed ? 'on' : ''}" data-act="relay" ${busy}></button></div>
-      <div class="s">${relay.installed ? `${relay.active ? t('relayActive') : t('relayIdle')} · <a class="link" data-act="relay-upstream" title="${esc(t('relayChange'))}">${esc(t('relayVia', { p: hostOf(ri.effective) || t('relayDirectShort') }))}</a>` : t('relayOffSub')}</div></div>
+      <div class="s">${relay.installed ? (relay.outdated ? `<a class="link" data-act="relay-update" title="${esc(t('relayOutdatedHelp'))}">${esc(t('relayOutdated'))}</a>` : `${relay.active ? t('relayActive') : t('relayIdle')} · <a class="link" data-act="relay-upstream" title="${esc(t('relayChange'))}">${esc(t('relayVia', { p: hostOf(ri.effective) || t('relayDirectShort') }))}</a>`) : t('relayOffSub')}</div></div>
   </section>`;
 }
 
@@ -385,9 +422,12 @@ function appsSection(d) {
   const apps = d.apps || [];
   const head = `<div class="section-head"><h2>${t('apps')}</h2><span class="count">${apps.length}</span><div class="spacer"></div></div>`;
   if (!apps.length) {
-    const cat = (S.info?.catalog || [])[0];
+    // One app in Custom gets its own button; with several, the button opens the list to choose from.
+    const cats = S.info?.catalog || [];
+    const catBtn = cats.length === 1 ? `<button class="btn primary" data-act="install" data-cat="${esc(cats[0].id)}">${icon('download')} ${t('install')} ${esc(cats[0].name)}</button>`
+      : cats.length ? `<button class="btn primary" data-act="install" data-tab="catalog">${icon('puzzle')} ${t('installFromCatalog')}</button>` : '';
     return head + `<div class="empty"><div class="art">${icon('package')}</div><h3>${t('noAppsTitle')}</h3><p>${t('noAppsText')}</p>
-      <div class="actions">${cat ? `<button class="btn primary" data-act="install" data-cat="${esc(cat.id)}">${icon('download')} ${t('install')} ${esc(cat.name)}</button>` : ''}<button class="btn" data-act="install" data-tab="git">${icon('branch')} ${t('installFromGit')}</button></div></div>`;
+      <div class="actions">${catBtn}<button class="btn" data-act="install" data-tab="git">${icon('branch')} ${t('installFromGit')}</button></div></div>`;
   }
   return head + `<div class="app-grid">${apps.map((a) => appCard(a, d)).join('')}</div>`;
 }
@@ -424,12 +464,15 @@ function appCard(a, d) {
   const src = dep
     ? (dep.repo.startsWith('local:')
       ? `<div class="row" title="${esc(dep.repo.slice(6))}">${icon('folder', 'sm')}<span>${t('localFolder')}</span><code>${esc(dep.repo.slice(6).split(/[\\/]/).filter(Boolean).pop() || '')}</code></div>`
-      : `<div class="row">${icon('branch', 'sm')}<span class="t">${esc(repoLabel(dep.repo))}</span><span>@</span><code>${esc(dep.ref || '')}</code>${dep.commit ? `<code>${esc(short(dep.commit))}${dep.dirty ? '*' : ''}</code>` : ''}</div>`)
+      : `<div class="row">${icon('branch', 'sm')}${repoWeb(dep.repo)
+        ? `<a class="link" data-act="open-web" data-url="${esc(repoWeb(dep.repo))}" title="${esc(repoWeb(dep.repo))}">${esc(repoLabel(dep.repo))}</a>`
+        : `<span class="t">${esc(repoLabel(dep.repo))}</span>`}<span>@</span><code>${esc(dep.ref || '')}</code>${dep.commit ? `<code${repoWeb(dep.repo) ? ` class="click" data-act="open-web" data-url="${esc(repoWeb(dep.repo) + '/commit/' + dep.commit)}" title="${esc(dep.commit)}"` : ''}>${esc(short(dep.commit))}${dep.dirty ? '*' : ''}</code>` : ''}</div>`)
       + `<div class="row">${icon('clock', 'sm')}<span class="t">${esc(dep.subject || '')}${dep.subject ? ' · ' : ''}${esc(t('deployed', { when: when(dep.deployedAt) }))}</span>${upd && !upd.behind ? `<span class="latest">${icon('check', 'sm')}${t('isLatest')}</span>` : ''}</div>`
       + (upd?.behind ? `<div class="row upd" data-act="update" data-folder="${esc(a.folder)}"><span class="reddot"></span><span class="t"><b>${esc(upd.commits > 0 ? t('newCommits', { n: upd.commits }) : t('updateAvailable'))}</b> <code>${esc(short(upd.latest))}</code> ${esc(upd.subject || '')}${upd.date ? ' · ' + esc(when(upd.date)) : ''}</span></div>` : '')
     : `<div class="row">${icon('info', 'sm')}<span class="t">${t('notByQuay')}</span></div>`
       + (upd?.unknown ? `<div class="row" title="${esc(upd.repo)}">${icon('branch', 'sm')}<span class="t">${t('latestOnGitHub')} <code>${esc(short(upd.latest))}</code> ${esc(upd.subject || '')}${upd.date ? ' · ' + esc(when(upd.date)) : ''}</span></div>` : '');
-  const setup = p?.system && a.systemReady === false
+  // Not while an install or update runs: those apply the setup themselves when asked to.
+  const setup = !op && p?.system && a.systemReady === false
     ? `<div class="callout warn">${icon('alert')}<div class="grow">${esc(t('setupCallout', { name: p.name, what: firstSentence(zhOr(p.system.description, p.system.descriptionZh)) }))}</div><button class="btn sm" data-act="prepare" data-folder="${esc(a.folder)}">${t('applySetup')}</button></div>` : '';
 
   let foot;
@@ -619,7 +662,9 @@ function opCard(o) {
       const label = stepLabel(s);
       const detail = s.text && s.text !== label ? `<span class="detail">${esc(s.text)}</span>` : '';
       const prog = s.state === 'run' && o.progress?.step === s.key ? `${progressBar(o.progress)}<span class="pinfo">${esc(progressText(o.progress))}</span>` : '';
-      return `<li class="${s.state}"><span class="ico">${si}</span><span class="grow">${esc(label)}${detail}${prog}</span></li>`;
+      // A step without a progress bar shows what it is doing: its latest log line.
+      const tail = s.state === 'run' && !prog && (o.logCount || 0) > (s.logFrom || 0) ? `<span class="tail">${esc(o.logs[o.logs.length - 1].replace(/^\[(INFO|DEBUG)\]\s*/, '').trim())}</span>` : '';
+      return `<li class="${s.state}"><span class="ico">${si}</span><span class="grow">${esc(label)}${detail}${prog}${tail}</span></li>`;
     }).join('');
     const notes = o.notes.length ? `<div class="notes">${o.notes.map((n) => `<div class="note ${n.kind}">${icon(n.kind === 'warn' ? 'alert' : 'info', 'sm')}<span>${esc(n.text)}</span></div>`).join('')}</div>` : '';
     const err = o.state === 'fail' && o.error ? `<div class="err">${esc(o.error)}</div>` : '';
@@ -698,7 +743,7 @@ const confirm = (o) => pushModal('confirm', o);
 // The sudo prompt comes from Go in English ("Mirror on needs sudo. Password for arduino@duck.local:").
 const SUDO_WHAT = { 'Mirror on': 'mirror', 'Mirror off': 'mirror', 'Relay on': 'relay', 'Relay off': 'relay', 'Refresh the package lists': 'refresh',
   'Download the updates': 'download', 'Install the updates': 'upgrade', 'Apply system setup': 'system', 'Revert system setup': 'system', 'Rename the board': 'rename',
-  'Save Wi-Fi': 'wifi', 'Remove Wi-Fi': 'wifi', 'Mark Wi-Fi': 'wifi', 'Hotspot settings': 'hotspot', 'Away plan': 'away', Hotspot: 'hotspot', 'System fix': 'sysfix' };
+  'Save Wi-Fi': 'wifi', 'Remove Wi-Fi': 'wifi', 'Mark Wi-Fi': 'wifi', 'Hotspot settings': 'hotspot', 'Away plan': 'away', Hotspot: 'hotspot', 'System fix': 'sysfix', "Set the board's clock": 'clock' };
 function promptText(d) {
   if (d.title === 'SSH login') return [t('passwordTitle'), d.message];
   const m = /^(.*) needs sudo\. Password for (.*):$/.exec(d.message || '');
@@ -719,40 +764,62 @@ modalViews.hostkey = (d) => ({
 });
 
 // --- add / edit board
+// Adding: the boards Quay finds on USB and on the network come first; below, a board can be added by
+// hand, by its address or as a USB device. Editing: how Quay reaches the board.
 modalViews.board = (d) => {
-  const ssh = d.kind !== 'adb';
   const edit = !!d.oldName;
-  const devices = d.devices == null ? `<div class="loading-line">${icon('spinner', 'spin')} ${t('scan')}…</div>`
-    : d.devices.length ? `<div class="device-list">${d.devices.map((x) => `<div class="device ${d.serial === x.serial ? 'on' : ''}" data-act="pick-device" data-serial="${esc(x.serial)}">${icon('usb')}<div class="grow"><b>${esc(x.serial)}</b>${x.state !== 'device' ? ` <span class="pill warn">${t('unauthorized')}</span>` : ''}</div>${d.serial === x.serial ? icon('check') : ''}</div>`).join('')}</div>`
-    : `<div class="callout warn" style="margin:0 0 12px">${icon('info')}<div class="grow">${d.devicesError ? esc(d.devicesError) : t('noUSB')}</div></div>`;
-  let found = '';
-  if (ssh && !edit) {
-    const list = d.found == null ? `<div class="loading-line">${icon('spinner', 'spin')} ${t('scanning')}</div>`
-      : d.found.length ? `<div class="device-list">${d.found.map((b) => {
-        const addr = b.host || (b.ips || [])[0] || '';
-        const sel = d.host === addr;
-        return `<div class="device ${sel ? 'on' : ''}" data-act="pick-found" data-host="${esc(addr)}">${icon('wifi')}<div class="grow"><b>${esc(b.name)}</b> <span class="sub">${esc(addr)}${(b.ips || []).length ? ' · ' + esc(b.ips.join(', ')) : ''}</span><div class="sub">${esc(b.model)}${b.serial ? ' · ' + esc(t('serial', { s: b.serial })) : ''}</div></div>${b.saved ? `<span class="pill">${esc(t('added', { name: b.saved }))}</span>` : sel ? icon('check') : ''}</div>`;
-      }).join('')}</div>`
-      : `<div class="callout warn" style="margin:0 0 12px">${icon('info')}<div class="grow">${d.foundError ? esc(d.foundError) : t('noneFound')}</div></div>`;
-    found = `<div class="field"><label style="display:flex;justify-content:space-between;align-items:center">${t('onNetwork')}<button class="btn sm ghost" data-act="scan-net">${icon('refresh', 'sm')} ${t('scan')}</button></label></div>${list}`;
-  }
-  const sshFields = `${field(t('host'), input('host', d.host, t('hostPh')))}
-    <button class="log-toggle" data-act="board-more">${icon(d.more ? 'chevronDown' : 'chevronRight', 'sm')} ${t('moreOptions')}</button>
+  const ssh = edit ? d.kind !== 'adb' : d.sel?.kind !== 'adb';
+  const serial = edit ? d.serial : d.sel?.kind === 'adb' ? d.sel.serial : '';
+  const more = `<button class="log-toggle" data-act="board-more">${icon(d.more ? 'chevronDown' : 'chevronRight', 'sm')} ${t('moreOptions')}</button>
     ${d.more ? `<div style="margin-top:10px"><div class="field-row">${field(t('user'), input('user', d.user, 'arduino'))}<div style="width:110px">${field(t('port'), input('port', d.port, '22', 'inputmode="numeric"'))}</div></div>
       ${field(t('keyFile'), `<div class="input-group">${input('keyFile', d.keyFile, '~/.ssh/id_ed25519')}<button class="btn" data-act="pick-key">${t('browse')}</button></div>`, t('keyFilePh'))}</div>` : ''}`;
-  const nameNote = edit ? `<div class="callout info" style="margin:0 0 12px">${icon('info')}<div class="grow">${esc(t('nameFromBoard', { name: d.oldName }))}</div><button class="btn sm" data-act="rename-board">${t('renameBoardLink')}</button></div>` : '';
-  const progress = d.adding ? `<div class="loading-line" style="margin-top:8px">${icon('spinner', 'spin')} ${esc(t('addingBoard', { host: ssh ? d.host : 'USB' }))}</div>`
+  const devices = d.devices == null ? `<div class="loading-line">${icon('spinner', 'spin')} ${t('scan')}…</div>`
+    : d.devices.length ? `<div class="device-list">${d.devices.map((x) => `<div class="device ${serial === x.serial ? 'on' : ''}" data-act="pick-device" data-serial="${esc(x.serial)}">${icon('usb')}<div class="grow"><b>${esc(x.serial)}</b>${x.state !== 'device' ? ` <span class="pill warn">${t('unauthorized')}</span>` : ''}</div>${serial === x.serial ? icon('check') : ''}</div>`).join('')}</div>`
+    : `<div class="callout warn" style="margin:0 0 12px">${icon('info')}<div class="grow">${d.devicesError ? esc(d.devicesError) : t('noUSB')}</div></div>`;
+  // The address or USB device, by hand (d.kind is the tab shown).
+  const byHand = `<div class="seg"><button class="${d.kind !== 'adb' ? 'on' : ''}" data-act="board-kind" data-kind="ssh">${icon('wifi')} ${t('viaSSH')}</button><button class="${d.kind === 'adb' ? 'on' : ''}" data-act="board-kind" data-kind="adb">${icon('usb')} ${t('viaUSB')}</button></div>
+    ${d.kind !== 'adb' ? field(t('host'), input('host', d.host, t('hostPh'))) + more : `<div class="field"><label style="display:flex;justify-content:space-between;align-items:center">${t('usbDevices')}<button class="btn sm ghost" data-act="scan-usb">${icon('refresh', 'sm')} ${t('scan')}</button></label></div>${devices}`}`;
+  let body;
+  if (edit) {
+    body = `<div class="callout info" style="margin:0 0 12px">${icon('info')}<div class="grow">${esc(t('nameFromBoard', { name: d.oldName }))}</div><button class="btn sm" data-act="rename-board">${t('renameBoardLink')}</button></div>
+      ${byHand}`;
+  } else {
+    const cur = selKey(d.sel), loading = d.devices == null || d.found == null;
+    const row = (k, act, ico, name, where, sub, saved, pill) => `<div class="device ${cur === k ? 'on' : ''}" ${act}>${icon(ico)}<div class="grow"><b>${esc(name)}</b> <span class="sub">${esc(where)}</span>${pill || ''}<div class="sub">${esc(sub)}</div></div>${saved ? `<span class="pill">${esc(t('added', { name: saved }))}</span>` : cur === k ? icon('check') : ''}</div>`;
+    const rows = [
+      ...(d.devices || []).map((x) => row('usb:' + x.serial, `data-act="pick-device" data-serial="${esc(x.serial)}"`, 'usb', x.hostname || x.serial, t('viaUSB'),
+        [x.model, t('serial', { s: x.serial })].filter(Boolean).join(' · '), x.saved,
+        x.state !== 'device' ? ` <span class="pill warn">${t('unauthorized')}</span>` : setupNeeded(x) ? ` <span class="pill">${t('setupNeeded')}</span>` : '')),
+      ...(d.found || []).map((b) => {
+        const addr = b.host || (b.ips || [])[0] || '';
+        return row('net:' + addr, `data-act="pick-found" data-host="${esc(addr)}"`, 'wifi', b.name, [addr, ...(b.ips || [])].filter((x, i, a) => x && a.indexOf(x) === i).join(' · '),
+          [b.model, b.serial ? t('serial', { s: b.serial }) : ''].filter(Boolean).join(' · '), b.saved, '');
+      }),
+    ];
+    const errs = [d.devicesError, d.foundError].filter(Boolean).map((e) => `<div class="sub">${esc(e)}</div>`).join('');
+    const list = rows.length ? `<div class="device-list">${rows.join('')}</div>${errs}` : loading ? ''
+      : `<div class="callout warn" style="margin:0 0 12px">${icon('info')}<div class="grow">${t('noneFound')}${errs}</div></div>`;
+    body = `<div class="field"><label style="display:flex;justify-content:space-between;align-items:center">${t('foundBoards')}<button class="btn sm ghost" data-act="scan-boards" ${loading ? 'disabled' : ''}>${icon('refresh', 'sm')} ${t('scan')}</button></label></div>
+      ${list}${loading ? `<div class="loading-line">${icon('spinner', 'spin')} ${t('scanning')}</div>` : ''}
+      <div class="field" style="margin-top:16px"><label>${t('manualAdd')}</label></div>
+      ${byHand}
+      ${check('makeDefault', d.makeDefault, t('makeDefault'))}
+      ${selFresh(d) ? `<div class="callout info" style="margin:12px 0 0">${icon('info')}<div class="grow">${t('addFreshNote')}</div></div>`
+        : check('uploadKey', d.uploadKey, esc(S.info?.publicKey ? t('uploadKeyAdd', { path: tildeKey(S.info.publicKey.path) }) : t('uploadKeyNew')), t('uploadKeyHelp'))}`;
+  }
+  const progress = d.adding ? `<div class="loading-line" style="margin-top:8px">${icon('spinner', 'spin')} ${esc(t('addingBoard', { host: ssh ? selHost(d) : 'USB' }))}</div>`
     : d.addError ? `<div class="callout warn" style="margin:8px 0 0">${icon('alert')}<div class="grow">${esc(d.addError)}</div></div>` : '';
   return {
-    html: header(ssh ? 'wifi' : 'usb', edit ? t('editBoardTitle') : t('addBoardTitle'), edit ? esc(d.oldName) : t('addBoardSub')) + `<div class="mbody">
-      ${nameNote}
-      <div class="seg"><button class="${ssh ? 'on' : ''}" data-act="board-kind" data-kind="ssh">${icon('wifi')} ${t('viaSSH')}</button><button class="${!ssh ? 'on' : ''}" data-act="board-kind" data-kind="adb">${icon('usb')} ${t('viaUSB')}</button></div>
-      ${ssh ? found + sshFields : `<div class="field"><label style="display:flex;justify-content:space-between;align-items:center">${t('usbDevices')}<button class="btn sm ghost" data-act="scan-usb">${icon('refresh', 'sm')} ${t('scan')}</button></label></div>${devices}`}
-      ${edit ? '' : check('makeDefault', d.makeDefault, t('makeDefault'))}
-      ${edit ? '' : check('uploadKey', d.uploadKey, esc(S.info?.publicKey ? t('uploadKeyAdd', { path: tildeKey(S.info.publicKey.path) }) : t('uploadKeyNew')), t('uploadKeyHelp'))}${progress}</div>
-      <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="save-board" data-primary ${d.adding ? 'disabled' : ''}>${edit ? t('save') : t('addBtn')}</button></footer>`,
+    html: header(edit ? (ssh ? 'wifi' : 'usb') : 'plus', edit ? t('editBoardTitle') : t('addBoardTitle'), edit ? esc(d.oldName) : t('addBoardSub')) + `<div class="mbody">
+      ${body}${progress}</div>
+      <footer>${edit ? `<button class="btn ghost danger-text" data-act="remove-board">${icon('trash', 'sm')} ${t('removeBoard')}</button>` : ''}<div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="save-board" data-primary ${d.adding ? 'disabled' : ''}>${edit ? t('save') : selFresh(d) ? t('nextBtn') : t('addBtn')}</button></footer>`,
   };
 };
+// selKey names a picked board ('usb:<serial>' or 'net:<address>'); selHost is the address being added.
+const selKey = (s) => (s ? (s.kind === 'adb' ? 'usb:' + s.serial : 'net:' + s.host) : '');
+const selHost = (d) => (d.oldName || !d.sel ? (d.host || '').trim() : d.sel.host || '');
+// selFresh: the picked board is on USB and never had its first setup, which adding goes on to.
+const selFresh = (d) => !d.oldName && d.sel?.kind === 'adb' && setupNeeded((d.devices || []).find((x) => x.serial === d.sel.serial));
 
 // --- install
 modalViews.install = (d) => {
@@ -881,8 +948,9 @@ modalViews.mirror = (d) => {
 modalViews.relay = (d) => ({
   html: header('link', d.edit ? t('relayUpTitle') : t('relayTitle'), d.edit ? t('relayUpSub') : t('relaySub')) + `<div class="mbody">
     ${d.edit ? '' : `<p style="margin:0 0 12px;color:var(--text-2)">${t('relayHow')}</p>`}
-    ${field(t('relayUpstream'), input('upstream', d.upstream, d.effective || t('relayDirect'), 'class="input mono"'), esc(t('relayUpstreamHelp', { p: d.effective || t('relayDirect') })))}</div>
-    <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="modal-ok" data-primary>${d.edit ? t('save') : t('turnOn')}</button></footer>`,
+    ${field(t('relayUpstream'), input('upstream', d.upstream, d.effective || t('relayDirect'), 'class="input mono" autofocus'), esc(t('relayUpstreamHelp', { p: d.effective || t('relayDirect') })))}
+    ${d.problem ? `<div class="callout warn" style="margin:8px 0 0">${icon('alert')}<div class="grow">${esc(t('relayBad_' + d.problem, { d: d.detail }))}</div></div>` : ''}</div>
+    <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="relay-ok" data-primary ${d.checking ? 'disabled' : ''}>${d.checking ? icon('spinner', 'sm spin') + ' ' : ''}${d.edit ? t('save') : t('turnOn')}</button></footer>`,
 });
 async function editRelayUpstream() {
   closeMenu();
@@ -898,12 +966,19 @@ const utf8Len = (s) => new TextEncoder().encode(s || '').length;
 const ssidError = (s) => (!s || utf8Len(s) > 32 ? t('ssidLen') : /[;\\\x00-\x1f\x7f]/.test(s) ? t('ssidChars') : s.trim() !== s ? t('ssidSpace') : '');
 const pskError = (p) => (/^[0-9a-fA-F]{64}$/.test(p) ? '' : p.length < 8 || p.length > 63 ? t('pskLen') : /[^\x20-\x7e]/.test(p) ? t('pskChars') : '');
 // netLine sums up the board's Wi-Fi from its status, for the overview card.
+// netLine sums up the board's Wi-Fi from its status, for the overview card (HTML). The away plan is
+// always there, as a link: many would not guess the board can be reached away from home.
 function netLine(n) {
   if (!n) return '';
-  if (n.hotspot) return t(n.ours ? 'netOnHotspot' : 'netOnOtherHotspot', { ssid: n.ssid }) + (n.ours && n.stations != null ? ' · ' + t('netDevices', { n: n.stations }) : '');
-  const away = n.away && n.away !== 'off' ? t('awayShort', { plan: t('away_' + n.away) }) : '';
-  if (n.state === 100 && n.ssid) return [t('netOnWifi', { ssid: n.ssid }), away].filter(Boolean).join(' · ');
-  return away;
+  const now = n.hotspot ? t(n.ours ? 'netOnHotspot' : 'netOnOtherHotspot', { ssid: n.ssid }) + (n.ours && n.stations != null ? ' · ' + t('netDevices', { n: n.stations }) : '')
+    : n.state === 100 && n.ssid ? t('netOnWifi', { ssid: n.ssid }) : '';
+  // The system's own hotspot (Duck Setup's on Duck OS) decides while it comes up by itself, and
+  // is worth naming while Quay's plan is not set up; otherwise Quay's plan is what holds.
+  const sh = n.systemHotspot, unset = !n.away || n.away === 'off';
+  const text = sh && (sh.autoconnect || unset) ? t('awaySys', { system: zhOr(sh.system, sh.systemZh), state: t(sh.autoconnect ? 'sysHsAuto' : 'sysHsManual') })
+    : t('awayShort', { plan: unset ? t('awayUnset') : t('away_' + n.away) });
+  const away = `<a class="link" data-act="network">${esc(text)}</a>`;
+  return [now && esc(now), away].filter(Boolean).join(' · ');
 }
 // The web consoles of the apps installed on the board (from their app.yaml ports or profile), as a
 // phone on the board's hotspot reaches them.
@@ -935,6 +1010,7 @@ modalViews.network = (d) => {
     const row = (p) => {
       const notes = [p.mode === 'ap' ? t('netOwnHotspot') : '', p.hidden ? t('netHidden') : '', p.secure ? '' : t('netOpen'), p.autoconnect || p.phone ? '' : t('netManual')].filter(Boolean);
       return `<div class="net-row">${icon('wifi')}<div class="grow"><b>${esc(p.ssid || p.id)}</b>${p.active ? ` <span class="pill ok">${t('netInUse')}</span>` : ''}${notes.length ? `<div class="sub">${esc(notes.join(' · '))}</div>` : ''}</div>
+        ${p.active || p.mode === 'ap' ? '' : `<button class="btn sm ghost" data-act="wifi-connect" data-uuid="${esc(p.uuid)}" ${off} title="${esc(t('netConnectHelp'))}">${t('netConnect')}</button>`}
         <button class="btn sm ghost icon" data-act="wifi-menu" data-uuid="${esc(p.uuid)}" ${off} title="${esc(t('netMore'))}">${icon('more', 'sm')}</button></div>`;
     };
     // A card's header: title, a spinner with what is being done there, and its button.
@@ -1044,16 +1120,22 @@ async function hotspotSettings(nd) {
   const d = { ssid: h.ssid || S.status[nd.board]?.data?.hostname || nd.board, psk: '', configured: h.configured, pskPh: h.configured ? t('pskKeep') : '' };
   return (await pushModal('hotspot', d)) ? d : null;
 }
+// pickAway changes the away plan, after a confirmation that says what the board will do (and that
+// the board's password is needed): clicking a plan to see what it is changes nothing.
 async function pickAway(mode) {
   const nd = topModal().data, n = nd.net;
   if (!n || n.away === mode) return;
+  const h = n.hotspot, ssid0 = h.configured ? h.ssid : '';
+  const parts = [t('awayDo_' + mode, { ssid: !ssid0 ? '' : lang() === 'zh' ? `「${ssid0}」` : `“${ssid0}”` }).replace(/ ([.;])/, '$1')]; // no name yet: "hotspot ;" → "hotspot;"
+  if (h.active && !wantsBoard(mode)) parts.push(t('awayDoLeave'));
+  parts.push(t(wantsBoard(mode) && !h.configured ? 'awayDoHotspotFirst' : 'awayDoSudo'));
+  if (!(await confirm({ icon: 'wifi', title: esc(t('awayConfirmTitle', { plan: t('away_' + mode) })), text: parts.map((x) => `<p>${esc(x)}</p>`).join(''), ok: t('awayConfirmOk') }))) return;
   let ssid = '', psk = '';
-  if (wantsBoard(mode) && !n.hotspot.configured) {
+  if (wantsBoard(mode) && !h.configured) {
     const s = await hotspotSettings(nd);
     if (!s) return;
     ssid = s.ssid; psk = s.psk;
   }
-  if (n.hotspot.active && !wantsBoard(mode) && !(await confirm({ icon: 'wifi', title: t('awayLeaveTitle'), text: t('awayLeaveText'), ok: t('away_' + mode) }))) return;
   netOp(nd, 'away', call('Away', nd.board, mode, ssid, psk), () => t('t_away', { plan: t('away_' + mode) }),
     { where: 'away', mode, text: t(wantsBoard(mode) && !wantsBoard(n.away) ? 'awaySwitchingInstall' : 'awaySwitching', { plan: t('away_' + mode) }) });
 }
@@ -1084,6 +1166,19 @@ async function systemFix(id) {
   if (nd) return netOp(nd, 'sysfix', call('SystemFix', nd.board, id), () => t('t_sysfix', { what: label }), { where: 'away', mode: nd.net.away, text: label + '…' });
   boardOp('sysfix', call('SystemFix', S.cur, id), undefined, () => t('t_sysfix', { what: label })).catch(() => {});
 }
+// wifiConnect switches the board to a saved network now: to try a phone hotspot at home, say.
+async function wifiConnect(uuid) {
+  const nd = topModal().data, p = nd.net?.profiles.find((x) => x.uuid === uuid);
+  if (!p) return;
+  const ssid = p.ssid || p.id;
+  const ok = await confirm({ icon: 'wifi', title: esc(t('wifiConnectTitle', { ssid })),
+    text: esc(t('wifiConnectText', { ssid })) + (p.phone ? ' ' + esc(t('wifiConnectPhone')) : ''), ok: t('netConnect') });
+  if (!ok) return;
+  nd.busy = true; invalidate('modal');
+  try { await boardOp('wifi', call('WifiConnect', nd.board, uuid), undefined, () => t('t_wifiJoining', { ssid })); } catch { nd.busy = false; invalidate('modal'); return; /* shown */ }
+  nd.busy = false;
+  closeModal(false);
+}
 async function hotspotNow(open) {
   const nd = topModal().data, ssid = nd.net.hotspot.ssid;
   const ok = await confirm({ icon: 'wifi', title: open ? t('hotspotOpenTitle') : t('hotspotCloseTitle'),
@@ -1106,33 +1201,142 @@ modalViews.rename = (d) => {
   };
 };
 
+// --- the board's password
+// passwdError mirrors core.ValidBoardPassword: arduino-passwd reads the password with a plain `read`.
+function passwdError(pw) {
+  if (!pw) return '';
+  if (pw.length > 128) return t('pwTooLong');
+  if (pw.includes('\\')) return t('pwBackslash');
+  if (pw.trim() !== pw) return t('pwSpaces');
+  if (/[\x00-\x1f\x7f]/.test(pw)) return t('pwControl');
+  return '';
+}
+// passwdForm: [ok, help or problem with the password, problem with the second one].
+function passwdForm(d) {
+  const e = passwdError(d.pw || '');
+  return [!!d.pw && !e && d.pw2 === d.pw, e || t('pwHelp'), d.pw2 && d.pw2 !== d.pw ? t('pwDiffer') : ''];
+}
+modalViews.passwd = (d) => {
+  const [ok, msg, again] = passwdForm(d), type = d.show ? 'text' : 'password';
+  return {
+    html: header('key', t('pwTitle'), esc(t('pwSub', { name: d.board }))) + `<div class="mbody">
+      ${field(t('pwNew'), `<div class="input-group"><input class="input" type="${type}" data-bind="pw" value="${esc(d.pw || '')}" autocomplete="new-password" autofocus><button class="btn" data-act="toggle-show">${t('show')}</button></div>`, `<span class="v-pw">${esc(msg)}</span>`)}
+      ${field(t('pwAgain'), `<input class="input" type="${type}" data-bind="pw2" value="${esc(d.pw2 || '')}" autocomplete="new-password">`, `<span class="v-pw2">${esc(again)}</span>`)}
+      <div class="callout info" style="margin:0">${icon('info')}<div class="grow">${t('pwNote')}</div></div></div>
+      <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="modal-ok" data-primary ${ok ? '' : 'disabled'}>${t('pwSet')}</button></footer>`,
+  };
+};
+async function openPasswd() {
+  const name = S.cur, d = { board: name, pw: '', pw2: '' };
+  if (!(await pushModal('passwd', d)) || !passwdForm(d)[0]) return;
+  openActivity();
+  try { await runOp(call('SetPassword', name, d.pw)); toast('ok', t('t_pwSet')); } catch (e) { fail(t('op_passwd'), e); }
+}
+
+// --- first setup over USB
+// firstSetupForm: [ok, name help, password help, second password problem, Wi-Fi name help, Wi-Fi password help].
+function firstSetupForm(d) {
+  const name = (d.name || '').trim().toLowerCase(), nameOk = HOSTNAME_RE.test(name);
+  const [pwOk, pwMsg, again] = passwdForm(d);
+  const sErr = d.ssid ? ssidError(d.ssid) : '', pErr = d.ssid && d.psk ? pskError(d.psk) : '';
+  return [nameOk && pwOk && !sErr && !pErr, nameOk ? t('fsNameHelp', { name }) : t('renameBad'), pwMsg, again, sErr || t('fsWifiHelp'), pErr || t('wifiPskHelp')];
+}
+modalViews.firstsetup = (d) => {
+  const [ok, nMsg, pwMsg, again, sMsg, pMsg] = firstSetupForm(d), type = d.show ? 'text' : 'password';
+  const list = d.seen == null ? `<div class="loading-line">${icon('spinner', 'spin')} ${t('wifiScanning')}</div>`
+    : d.seen.length ? `<div class="device-list scroll">${d.seen.map((x) => `<div class="device ${d.ssid === x.ssid ? 'on' : ''}" data-act="wifi-pick" data-ssid="${esc(x.ssid)}">${icon('wifi')}<div class="grow"><b>${esc(x.ssid)}</b> <span class="sub">${x.signal}%${x.security ? ' · ' + esc(x.security) : ' · ' + t('netOpen')}</span></div></div>`).join('')}</div>`
+    : `<p class="sys-note" style="margin:0 0 12px">${esc(d.seenError || t('wifiNoneInRange'))}</p>`;
+  return {
+    cls: 'wide',
+    html: header('sliders', t('fsTitle'), esc(t('fsSub', { name: d.board }))) + `<div class="mbody">
+      ${field(t('fsName'), input('name', d.name, 'duck', 'autofocus class="input mono"'), `<span class="v-name">${esc(nMsg)}</span>`)}
+      ${field(t('pwNew'), `<div class="input-group"><input class="input" type="${type}" data-bind="pw" value="${esc(d.pw || '')}" autocomplete="new-password"><button class="btn" data-act="toggle-show">${t('show')}</button></div>`, `<span class="v-pw">${esc(pwMsg)}</span>`)}
+      ${field(t('pwAgain'), `<input class="input" type="${type}" data-bind="pw2" value="${esc(d.pw2 || '')}" autocomplete="new-password">`, `<span class="v-pw2">${esc(again)}</span>`)}
+      <div class="field"><label class="row-label">${t('fsWifi')}<button class="btn sm ghost" data-act="wifi-rescan">${icon('refresh', 'sm')} ${t('scan')}</button></label></div>${list}
+      ${field(t('wifiName'), input('ssid', d.ssid, t('wifiNamePh')), `<span class="v-ssid">${esc(sMsg)}</span>`)}
+      ${field(t('wifiPassword'), `<input class="input" type="${type}" data-bind="psk" value="${esc(d.psk || '')}" autocomplete="new-password">`, `<span class="v-psk">${esc(pMsg)}</span>`)}
+      ${check('uploadKey', d.uploadKey, t('fsKey'), t('fsKeyHelp'))}
+      <div class="callout info" style="margin:0">${icon('info')}<div class="grow">${t('fsNote')}</div></div></div>
+      <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('cancel')}</button><button class="btn primary" data-act="modal-ok" data-primary ${ok ? '' : 'disabled'}>${t('fsStart')}</button></footer>`,
+  };
+};
+// openFirstSetup tells whether the setup ran (false: the form was cancelled).
+async function openFirstSetup() {
+  const name = S.cur, st = S.status[name]?.data;
+  const d = { board: name, name: st?.hostname || name, pw: '', pw2: '', ssid: '', psk: '', uploadKey: S.keyChoice?.[name] ?? true, seen: null };
+  const p = pushModal('firstsetup', d);
+  scanWifi(d, name);
+  if (!(await p) || !firstSetupForm(d)[0]) return false;
+  openActivity();
+  try {
+    const res = await runOp(call('FirstSetup', name, d.name.trim().toLowerCase(), d.pw, d.ssid, d.ssid ? d.psk : '', !!d.uploadKey));
+    await loadBoards();
+    if (d.uploadKey && !S.info?.publicKey) S.info = await call('Info');
+    S.cur = res.board || S.cur;
+    if (res.ssh) toast('ok', t('t_fsSSH', { name: res.board, host: res.host }));
+    else toast('warn', t('t_fsUSB', { note: res.note || '' }));
+    renderAll(); refresh(S.cur);
+  } catch (e) { fail(t('op_firstsetup'), e); }
+  return true;
+}
+
 // --- system update
+// What an update of the board installs: apt's own plan for the choice, from the check (new
+// dependencies come in only with the packages that need them). Left out with the desktop
+// skipped: what the same choice with the desktop would add. Without plans (an older check),
+// a guess from the list.
+function sysPlan(u, skip, arduinoOnly) {
+  const key = (o, sk) => [o && 'arduino', sk && 'skip'].filter(Boolean).join('+') || 'all';
+  const inMode = (p) => !(arduinoOnly && !p.arduino && !(p.downgrade && p.arduinoRepo)); // as UpgradeOptions.skips
+  const sum = (l) => l.reduce((a, p) => a + p.size, 0);
+  const pl = u.plans?.[key(arduinoOnly, skip)], base = u.plans?.[key(arduinoOnly, false)];
+  if (pl) {
+    const has = new Set(pl.packages), inBase = base && new Set(base.packages);
+    const left = skip ? u.packages.filter((p) => (inBase ? inBase.has(p.name) : inMode(p)) && !has.has(p.name)) : [];
+    return { pick: u.packages.filter((p) => has.has(p.name)), count: pl.count, size: pl.size, skipped: left.length, skippedSize: sum(left) };
+  }
+  const pick = u.packages.filter((p) => inMode(p) && !(skip && (p.desktop || p.pulled || !p.from)));
+  const left = skip ? u.packages.filter((p) => inMode(p) && (p.desktop || p.pulled)) : [];
+  return { pick, count: pick.length, size: sum(pick), skipped: left.length, skippedSize: sum(left) };
+}
 modalViews.system = (d) => {
   const s = S.sys[d.board] || {}, u = s.data, st = S.status[d.board]?.data;
   const cli = (u?.appcliVersion || st?.appcliVersion || '').replace(/^arduino[ -]app[ -]cli\s*/i, '').replace(/^version\s*/i, '');
   let body = '', count = 0, size = 0;
+  // Lists missing (a source just switched to a mirror) or old: what they say is not the news.
+  const stale = u?.listsStale ? `<div class="callout warn" style="margin:${u.total.count ? '10px 0 0' : '0'}">${icon('alert')}<div class="grow">${esc(u.listsMissing ? t('sysListsMissing', { n: u.listsMissing }) : t('sysListsOld', { date: u.listsDate ? new Date(u.listsDate * 1000).toISOString().slice(0, 10) : '?' }))}</div></div>` : '';
   if (s.loading) {
     body = `<div class="loading-line">${icon('spinner', 'spin')} ${t('sysChecking')}</div>${d.log.length ? `<div class="mini-log">${esc(d.log.slice(-4).join('\n'))}</div>` : ''}`;
   } else if (s.error) {
     body = `<div class="callout warn" style="margin:0">${icon('alert')}<div class="grow">${esc(s.error)}</div></div>`;
   } else if (u && !u.total.count) {
-    body = `<div class="ok-line">${icon('check')} ${t('sysUpToDate')}${cli ? ` · App CLI ${esc(cli)}` : ''}</div>`;
+    body = stale || `<div class="ok-line">${icon('check')} ${t('sysUpToDate')}${cli ? ` · App CLI ${esc(cli)}` : ''}</div>`;
+  } else if (u && d.skipDesktop && !sysPlan(u, true, false).count) {
+    // Only skipped desktop updates are left: up to date, with the way back right here.
+    const plan = sysPlan(u, true, false);
+    body = (stale || `<div class="ok-line">${icon('check')} ${esc(t('sysUpToDateSkipped', { n: plan.skipped }))}${cli ? ` · App CLI ${esc(cli)}` : ''}</div>`) +
+      `<div style="margin-top:12px">${check('skipDesktop', true, t('sysSkipDesktop'), esc(t('sysSkipDesktopOn', { n: plan.skipped, size: mb(plan.skippedSize) })))}</div>`;
   } else if (u) {
-    const pick = u.packages.filter((p) => !(d.mode === 'arduino' && !p.arduino) && !(d.skipDesktop && p.desktop));
-    count = pick.length; size = pick.reduce((a, p) => a + p.size, 0);
-    const arduino = u.packages.filter((p) => p.arduino && p.from).map((p) => `<span class="pkg"><code>${esc(p.name)}</code> ${esc(p.from)} → <b>${esc(p.to)}</b></span>`);
-    const desk = u.packages.filter((p) => p.desktop && !(d.mode === 'arduino' && !p.arduino)).reduce((a, p) => a + p.size, 0);
-    const tips = [];
-    if (!(st?.mirror?.debian && !/deb\.debian\.org/.test(st.mirror.debian))) tips.push(`<div class="tip">${icon('download', 'sm')}<span class="grow">${t('sysTipMirror')}</span><button class="btn sm" data-act="mirror">${t('turnOn')}</button></div>`);
-    if (!st?.relay?.installed) tips.push(`<div class="tip">${icon('link', 'sm')}<span class="grow">${t('sysTipRelay')}</span><button class="btn sm" data-act="relay">${t('turnOn')}</button></div>`);
+    const plan = sysPlan(u, d.skipDesktop, d.mode === 'arduino');
+    const pick = plan.pick;
+    count = plan.count; size = plan.size;
+    const arduino = u.packages.filter((p) => p.arduino && p.from).map(pkgSpan);
+    const down = pick.filter((p) => p.downgrade);
+    const desk = sysPlan(u, true, d.mode === 'arduino').skippedSize;
+    // Both ways to download faster, each with its state: one already on is still worth seeing.
+    const tips = [], mOn = mirrorOn(st), mCur = mirrorOf(st?.mirror?.debian && !/deb\.debian\.org/.test(st.mirror.debian) ? st.mirror.debian : st?.mirror?.pip);
+    tips.push(`<div class="tip">${icon('download', 'sm')}<span class="grow">${t('sysTipMirror')}</span>${mOn ? `<span class="pill ok">${esc(mCur ? t('sysTipOnWith', { name: mirrorName(mCur) }) : t('mirrorOn'))}</span>` : `<button class="btn sm" data-act="mirror">${t('turnOn')}</button>`}</div>`);
+    tips.push(`<div class="tip">${icon('link', 'sm')}<span class="grow">${t('sysTipRelay')}</span>${st?.relay?.installed ? `<span class="pill ok">${t('mirrorOn')}</span>` : `<button class="btn sm" data-act="relay">${t('turnOn')}</button>`}</div>`);
     body = `<div class="sys-sum"><b>${esc(t('sysUpdates', { n: u.total.count }))}</b><span>${esc(t('sysDownload', { size: mb(u.total.size) }))}</span></div>
       <table class="sys-src">${u.sources.map((g) => `<tr><td>${esc(g.host === '(cached)' ? t('sysCached') : g.host)}</td><td class="n">${esc(t('sysPackages', { n: g.count }))}</td><td class="n">${g.host === '(cached)' ? '' : mb(g.size)}</td></tr>`).join('')}</table>
       ${arduino.length ? `<div class="sys-pkgs"><span class="lbl">${t('sysArduino')}</span> ${arduino.join(' ')}</div>` : ''}
       <div class="seg"><button class="${d.mode !== 'arduino' ? 'on' : ''}" data-act="sys-mode" data-mode="all">${t('sysModeAll')}</button><button class="${d.mode === 'arduino' ? 'on' : ''}" data-act="sys-mode" data-mode="arduino">${t('sysModeArduino')}</button></div>
-      ${u.desktop.count ? check('skipDesktop', d.skipDesktop, t('sysSkipDesktop'), esc(t('sysSkipDesktopHelp', { size: mb(desk) }))) : ''}
+      ${u.desktop.count || d.skipDesktop ? check('skipDesktop', d.skipDesktop, t('sysSkipDesktop'), esc(d.skipDesktop ? t('sysSkipDesktopOn', { n: plan.skipped, size: mb(plan.skippedSize) }) : t('sysSkipDesktopHelp', { size: mb(desk) }))) : ''}
       <div class="sys-will">${esc(t('sysWillInstall', { n: count, size: mb(size) }))}</div>
       ${u.running?.length ? `<div class="callout warn" style="margin:10px 0 0">${icon('alert')}<div class="grow">${esc(t('sysRunning', { apps: u.running.join(', ') }))}</div></div>` : ''}
+      ${down.length ? `<div class="callout info" style="margin:10px 0 0">${icon('info')}<div class="grow">${esc(t(down.every((p) => p.arduinoRepo) ? 'sysDowngradeArduino' : 'sysDowngradeOther', { n: down.length }))}</div></div>` : ''}
       ${u.rebootRequired ? `<div class="callout warn" style="margin:10px 0 0">${icon('info')}<div class="grow">${t('sysReboot')}</div></div>` : ''}
+      ${stale}
       ${tips.length ? `<div class="tips"><div class="lbl">${t('sysFaster')}</div>${tips.join('')}</div>` : ''}
       <p class="sys-note">${t('sysNote')}</p>`;
   }
@@ -1155,8 +1359,82 @@ modalViews.about = (d) => ({
       <details ${d.open ? 'open' : ''}><summary data-act="about-toggle">${t('thirdParty')}</summary>
         ${d.text == null ? `<div class="loading-line">${icon('spinner', 'spin')}</div>` : `<pre class="log selectable">${esc(d.text)}</pre>`}</details>
     </div>
-    <footer><div class="spacer"></div><button class="btn primary" data-act="modal-ok" data-primary>${t('close')}</button></footer>`,
+    <footer>${aboutUpdate()}<div class="spacer"></div><button class="btn primary" data-act="modal-ok" data-primary>${t('close')}</button></footer>`,
 });
+function aboutUpdate() {
+  const u = S.update || {};
+  if (u.dev) return `<span class="muted small">${t('updDev')}</span>`;
+  if (u.available) return `<button class="btn" data-act="selfupdate">${icon('download', 'sm')} ${esc(t('updNew', { v: u.latest.version }))}</button>`;
+  return `<button class="btn ghost" data-act="update-check" ${S.updateChecking ? 'disabled' : ''}>${icon(S.updateChecking ? 'spinner' : 'refresh', S.updateChecking ? 'sm spin' : 'sm')} ${t('updCheck')}</button>${u.checked && !S.updateChecking ? `<span class="muted small">${esc(u.error ? t('updCheckFailed') : t('updUpToDate', { cur: u.current }))}</span>` : ''}`;
+}
+// checkUpdate asks for the newest release (force: now, not from the last check) and refreshes the pill.
+async function checkUpdate(force) {
+  S.updateChecking = true; invalidate('modal');
+  try { S.update = await runOp(call('CheckUpdate', !!force)); } catch { /* offline: try again later */ }
+  S.updateChecking = false; invalidate('sidebar', 'modal');
+}
+// A little Markdown for release notes: headings, bullets, `code`, **bold**, [links](…) as text.
+function notesHtml(md) {
+  return (md || '').split(/\r?\n/).map((l) => {
+    let h = esc(l).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    if (/^#{1,4} /.test(l)) return `<div class="nh">${h.replace(/^#{1,4} /, '')}</div>`;
+    if (/^\s*[-*] /.test(l)) return `<div class="nb">• ${h.replace(/^\s*[-*] /, '')}</div>`;
+    return h.trim() ? `<div>${h}</div>` : '<div class="ngap"></div>';
+  }).join('');
+}
+modalViews.selfupdate = (d) => {
+  const u = S.update || {}, r = u.latest || {}, deb = u.kind === 'deb';
+  // Without the macOS first-launch section every release ends with: an update does not need it.
+  const notes = (r.notes || '').split(/\r?\n---\s*\r?\n\s*### macOS/)[0].trim();
+  let body;
+  if (d.result?.manual) body = `<p>${t('updDebDone')}</p><pre class="log selectable">${esc(d.result.manual)}</pre>`;
+  else if (d.restarting) body = `<div class="loading-line">${icon('spinner', 'spin')} ${t('updRestarting')}</div>`;
+  else if (d.installing) body = `<div class="loading-line">${icon('spinner', 'spin')} ${t('updInstalling')}${d.progress ? ' · ' + esc(progressText(d.progress)) : ''}</div>${d.progress ? progressBar(d.progress) : ''}`;
+  else body = `<div class="upd-notes">${notes ? notesHtml(notes) : `<p class="muted">${t('updNoNotes')}</p>`}</div>
+      <div class="upd-facts">${u.size ? `<div>${esc(t('updSize', { size: mb(u.size) }))}</div>` : ''}<div>${esc(deb ? t('updDeb') : t('updWhere', { path: u.path }))}</div><div class="muted">${t('updVerified')}</div></div>
+      ${d.error ? `<div class="callout warn" style="margin:12px 0 0">${icon('alert')}<div class="grow">${esc(d.error)}</div></div>` : ''}`;
+  const busy = d.installing || d.restarting;
+  return {
+    cls: 'wide',
+    html: header('download', esc(t('updTitle', { v: r.version })), esc(t('updSub', { cur: u.current }))) + `<div class="mbody">${body}</div>
+      <footer>${r.url ? `<button class="btn ghost" data-act="open-web" data-url="${esc(r.url)}">${icon('external', 'sm')} ${t('updRelease')}</button>` : ''}<div class="spacer"></div>
+        ${d.result?.manual ? `<button class="btn" data-act="update-reveal">${t('updReveal')}</button><button class="btn primary" data-act="modal-close" data-primary>${t('close')}</button>`
+          : `<button class="btn" data-act="modal-close" ${busy ? 'disabled' : ''}>${t('updLater')}</button><button class="btn primary" data-act="update-install" data-primary ${busy ? 'disabled' : ''}>${deb ? t('updDownloadDeb') : t('updInstall')}</button>`}</footer>`,
+  };
+};
+async function installUpdate() {
+  const d = topModal().data;
+  d.installing = true; d.error = ''; d.progress = null; invalidate('modal');
+  try {
+    d.result = await runOp(call('InstallUpdate'), (e) => { if (e.type === 'progress') { d.progress = e.data; invalidate('modal'); } });
+    d.installing = false;
+    if (d.result?.relaunch) { d.restarting = true; invalidate('modal'); await call('Relaunch'); return; }
+  } catch (e) { d.installing = false; d.error = e.message || String(e); }
+  invalidate('modal');
+}
+// --- settings
+modalViews.settings = (d) => {
+  const st = d.st;
+  const from = st ? (st.profilesSource === 'built in' ? t('setProfilesBuiltin') : st.profilesSource.startsWith('http') ? t('setProfilesFetched') : st.profilesSource) : '';
+  return {
+    html: header('sliders', t('settings'), t('settingsSub')) + `<div class="mbody">
+      ${!st ? `<div class="loading-line">${icon('spinner', 'spin')}</div>` : `
+      <div class="set-row"><div class="grow"><b>${t('setProfilesAuto')}</b><div class="help">${t('setProfilesAutoHelp', { repo: '<a class="link" data-act="open-web" data-url="https://github.com/caoxg/quay-profiles">github.com/caoxg/quay-profiles</a>' })}</div></div>
+        <button class="switch ${st.profilesAuto ? 'on' : ''}" data-act="set-profiles-auto" ${d.busy ? 'disabled' : ''}></button></div>
+      <div class="set-now">${esc(t('setProfilesNow', { date: st.profilesUpdated, from }))}
+        <button class="btn sm ghost" data-act="profiles-refresh" ${d.busy ? 'disabled' : ''}>${icon(d.refreshing ? 'spinner' : 'refresh', d.refreshing ? 'sm spin' : 'sm')} ${t('setProfilesRefresh')}</button></div>
+      <div class="set-row set-sep"><div class="grow"><b>${t('setLog')}</b><div class="help">${t('setLogHelp')}</div><code class="set-path">${esc(st.logDir)}</code></div>
+        <button class="btn sm" data-act="reveal-log">${icon('folder', 'sm')} ${t('setLogReveal')}</button></div>
+      ${d.error ? `<div class="callout warn" style="margin:10px 0 0">${icon('alert')}<div class="grow">${esc(d.error)}</div></div>` : ''}`}</div>
+      <footer><div class="spacer"></div><button class="btn primary" data-act="modal-ok" data-primary>${t('close')}</button></footer>`,
+  };
+};
+async function openSettings() {
+  const d = { st: null };
+  const p = pushModal('settings', d);
+  call('Settings').then((st) => { d.st = st; invalidate('modal'); }).catch((e) => { d.error = e.message || String(e); invalidate('modal'); });
+  await p;
+}
 async function openAbout() {
   const d = { text: null, open: false };
   const p = pushModal('about', d);
@@ -1328,13 +1606,20 @@ async function inspect(d) {
   d.inspecting = false; invalidate('modal');
 }
 
-async function openBoardDialog(existing, mode) {
+// removeBoard forgets a saved board after asking; it tells whether it did.
+async function removeBoard(b) {
+  if (!b || !(await confirm({ icon: 'trash', danger: true, title: esc(t('removeBoardQ', { name: b.name })), text: t('removeBoardText'), ok: t('removeBoard') }))) return false;
+  await call('RemoveBoard', b.name); delete S.status[b.name]; S.cur = null; await loadBoards(); renderAll(); if (S.cur) refresh(S.cur);
+  return true;
+}
+
+async function openBoardDialog(existing) {
   const d = existing
     ? { ...existing, oldName: existing.name, makeDefault: existing.name === S.def, port: existing.port || 22, devices: null, more: !!(existing.keyFile || (existing.port && existing.port !== 22) || (existing.user && existing.user !== 'arduino')) }
-    : { kind: mode === 'usb' ? 'adb' : 'ssh', host: '', user: 'arduino', port: 22, keyFile: '', serial: '', makeDefault: !S.boards.length, devices: null, found: null, more: false, uploadKey: true };
+    : { kind: 'ssh', sel: null, host: '', user: 'arduino', port: 22, keyFile: '', makeDefault: !S.boards.length, devices: null, found: null, more: false, uploadKey: true };
   const p = pushModal('board', d);
-  if (d.kind === 'adb') scanUSB(d);
-  else if (!existing) scanNet(d);
+  if (!existing) scanBoards(d);
+  else if (d.kind === 'adb') scanUSB(d);
   if (!(await p)) return;
   if (existing) {
     S.cur = existing.name;
@@ -1345,19 +1630,30 @@ async function openBoardDialog(existing, mode) {
     return;
   }
   const res = d.result, name = res.board;
+  if (res.replaced) toast('info', t('t_boardReplaced', { old: res.replaced, via: res.replacedVia }), null, 9000);
   await loadBoards();
   S.cur = name;
   S.status[name] = { data: res };
   delete S.sys[name];
   renderAll();
+  // A fresh board goes straight on to its first setup; the board page's checks follow it.
+  if (d.added.kind === 'adb' && setupNeeded(res) && await openFirstSetup()) return;
   checkUpdates(name, res.apps || []);
-  loadSystem(name);
+  loadSystem(name, 'auto');
+}
+// scanBoards looks on USB and on the network at once. A single new board found is picked, unless one
+// was picked or an address typed meanwhile; a board seen both ways counts once, by its address.
+async function scanBoards(d) {
+  await Promise.all([scanUSB(d), scanNet(d)]);
+  if (d.sel || (d.host || '').trim()) return;
+  const net = d.found.filter((b) => !b.saved), onNet = new Set(net.map((b) => b.serial).filter(Boolean));
+  const fresh = [...d.devices.filter((x) => x.state === 'device' && !x.saved && !onNet.has(x.serial)).map((x) => ({ kind: 'adb', serial: x.serial })),
+    ...net.map((b) => ({ kind: 'ssh', host: b.host || b.ips?.[0] || '' }))];
+  if (fresh.length === 1) { d.sel = fresh[0]; invalidate('modal'); }
 }
 async function scanNet(d) {
   d.found = null; d.foundError = ''; invalidate('modal');
   try { d.found = await runOp(call('Scan')); } catch (e) { d.found = []; d.foundError = e.message || String(e); }
-  const fresh = d.found.filter((b) => !b.saved);
-  if (fresh.length === 1 && !d.host) d.host = fresh[0].host || fresh[0].ips?.[0] || '';
   invalidate('modal');
 }
 async function openMirror() {
@@ -1441,15 +1737,44 @@ async function openRename() {
   } catch (e) { fail(t('op_rename'), e); }
   invalidate('main', 'sidebar');
 }
+// SYS_RECENT is how long a check of the board's system updates is shown without looking again.
+const SYS_RECENT = 10 * 60 * 1000;
+
+// pkgSpan shows an update of one package: name, from → to, and whether it goes to a lower version.
+const pkgSpan = (p) => `<span class="pkg"><code>${esc(p.name)}</code> ${esc(p.from)} → <b>${esc(p.to)}</b>${p.downgrade ? ` <span class="pill warn">${t('sysDowngrade')}</span>` : ''}</span>`;
+
+// An update that changed apt's version rules (a package brought a file to /etc/apt/preferences.d)
+// asks before installing what the new rules change.
+modalViews.rules = (d) => ({
+  html: header('package', t('rulesTitle'), esc(d.board)) + `<div class="mbody">
+    <p style="margin:0 0 8px">${t('rulesText')}</p>
+    <div class="sys-pkgs" style="margin:0 0 12px">${d.rules.files.map((f) => `<span class="pkg"><code>${esc(f.path)}</code>${f.package ? ' ' + esc(t('rulesFrom', { pkg: f.package })) : ''}</span>`).join(' ')}</div>
+    <p style="margin:0 0 8px">${esc(t('rulesPkgs', { n: d.rules.packages.length }))}</p>
+    <div class="sys-pkgs" style="margin:0 0 12px">${d.rules.packages.map(pkgSpan).join(' ')}</div>
+    <div class="callout info" style="margin:0">${icon('info')}<div class="grow">${t('rulesNote')}</div></div></div>
+    <footer><div class="spacer"></div><button class="btn" data-act="modal-close">${t('rulesLater')}</button><button class="btn primary" data-act="modal-ok" data-primary>${esc(t('rulesOk', { n: d.rules.packages.length }))}</button></footer>`,
+});
+
 async function openSystem() {
   const name = S.cur;
-  const d = { board: name, mode: 'all', skipDesktop: false, log: [] };
+  const d = { board: name, mode: 'all', skipDesktop: !!board(name)?.skipDesktop, log: [] };
   const p = pushModal('system', d);
-  if (!S.sys[name]?.data && !S.sys[name]?.loading) loadSystem(name);
+  // A recent check (the board page's) is shown as it is: a restart or a re-flash drops it (see
+  // refresh). An older one is looked at again; lists that are missing or old are refreshed first
+  // (apt-get update needs no password on the image).
+  const s0 = S.sys[name], recent = s0?.data && Date.now() - (s0.data.checkedAt || 0) < SYS_RECENT;
+  if (s0?.data?.listsStale && !s0.loading) loadSystem(name, true);
+  else if (!recent && !s0?.loading) loadSystem(name).then((u) => { if (u?.listsStale && topModal()?.type === 'system') loadSystem(name, true); });
   if (!(await p)) return;
   const opt = { arduinoOnly: d.mode === 'arduino', skipDesktop: !!d.skipDesktop, downloadOnly: !!d.downloadOnly };
   openActivity();
-  await boardOp('sysupdate', (f) => call('SystemUpdate', name, { ...opt, force: f }), undefined, (r) => (r?.downloaded ? t('t_sysdownload') : r?.rebootRequired ? t('t_sysupdateReboot') : t('t_sysupdate'))).catch(() => {});
+  const done = (r) => (r?.downloaded ? t('t_sysdownload') : r?.rebootRequired ? t('t_sysupdateReboot') : t('t_sysupdate'));
+  const r = await boardOp('sysupdate', (f) => call('SystemUpdate', name, { ...opt, force: f }), undefined, done).catch(() => null);
+  loadSystem(name);
+  // The update changed apt's version rules: what they change is installed only when asked.
+  if (!r?.rules?.packages?.length || !(await pushModal('rules', { board: name, rules: r.rules }))) return;
+  openActivity();
+  await boardOp('sysupdate', (f) => call('SystemUpdate', name, { ...opt, downloadOnly: false, force: f }), undefined, done).catch(() => {});
   loadSystem(name);
 }
 async function toggleRelay() {
@@ -1458,19 +1783,20 @@ async function toggleRelay() {
   if (d.relay?.installed) {
     if (!(await confirm({ icon: 'link', title: t('relayOffTitle'), text: t('relayOffText'), ok: t('turnOff') }))) return;
     openActivity();
-    boardOp('relay', call('Relay', S.cur, false, ''), undefined, () => t('t_relay')).catch(() => {});
+    boardOp('relay', call('Relay', S.cur, false, ''), undefined, () => t('t_relay')).catch(() => {}).finally(loadRelayInfo);
     return;
   }
   const info = await call('RelaySettings').catch(() => ({}));
   const m = { upstream: info.upstream || '', effective: info.effective || '' };
   if (!(await pushModal('relay', m))) return;
   openActivity();
-  boardOp('relay', call('Relay', S.cur, true, m.upstream.trim()), undefined, () => t('t_relay')).catch(() => {});
+  boardOp('relay', call('Relay', S.cur, true, m.upstream.trim()), undefined, () => t('t_relay')).catch(() => {}).finally(loadRelayInfo);
 }
+async function loadRelayInfo() { S.relayInfo = await call('RelaySettings').catch(() => S.relayInfo); invalidate('main'); }
 async function scanUSB(d) {
   d.devices = null; d.devicesError = ''; invalidate('modal');
   try { d.devices = await call('USBDevices'); } catch (e) { d.devices = []; d.devicesError = e.message || String(e); }
-  if (d.devices.length === 1 && !d.serial) d.serial = d.devices[0].serial;
+  if (d.oldName && d.devices.length === 1 && !d.serial) d.serial = d.devices[0].serial;
   invalidate('modal');
 }
 
@@ -1611,24 +1937,24 @@ async function editPolicyIndexes(d) {
 // ---------------------------------------------------------------- actions (data-act)
 const act = {
   'select-board': ({ board: name }) => { if (S.cur === name) return; S.cur = name; renderAll(); if (!S.status[name]?.data) refresh(name); },
-  'add-board': ({ mode }) => openBoardDialog(null, mode),
+  'add-board': () => openBoardDialog(null),
   'edit-board': () => openBoardDialog(board(S.cur)),
   'board-menu': (_, el) => {
     const b = board(S.cur);
     openMenu(el, [
       { icon: 'edit', label: t('editBoard'), fn: () => openBoardDialog(b) },
       { icon: 'sliders', label: t('renameBoard'), disabled: !S.status[S.cur]?.data, fn: () => openRename() },
+      { icon: 'key', label: t('setPassword'), disabled: !S.status[S.cur]?.data, fn: () => openPasswd() },
+      ...(b.kind === 'adb' ? [{ icon: 'sliders', label: t('fsMenu'), disabled: !S.status[S.cur]?.data, fn: () => openFirstSetup() }] : []),
       { icon: 'package', label: t('systemUpdate'), disabled: !S.status[S.cur]?.data, fn: () => openSystem() },
       { icon: 'key', label: keyOn(S.status[S.cur]?.data) ? t('keyUploaded') : t('uploadKey'), disabled: !S.status[S.cur]?.data || keyOn(S.status[S.cur]?.data), fn: () => doUploadKey() },
       { icon: 'star', label: t('makeDefault'), disabled: S.def === b.name, fn: async () => { await call('SetDefault', b.name); await loadBoards(); invalidate('sidebar'); } },
       { icon: 'boot', label: t('op_autostart_none'), disabled: !S.status[S.cur]?.data?.apps?.some((a) => a.default), fn: () => doAutostart('') },
       '-',
-      { icon: 'trash', label: t('removeBoard'), danger: true, fn: async () => {
-        if (!(await confirm({ icon: 'trash', danger: true, title: esc(t('removeBoardQ', { name: b.name })), text: t('removeBoardText'), ok: t('removeBoard') }))) return;
-        await call('RemoveBoard', b.name); delete S.status[b.name]; S.cur = null; await loadBoards(); renderAll(); if (S.cur) refresh(S.cur);
-      } },
+      { icon: 'trash', label: t('removeBoard'), danger: true, fn: () => removeBoard(b) },
     ]);
   },
+  'remove-board': async () => { const d = topModal().data; if (await removeBoard(board(d.oldName))) closeModal(false); },
   refresh: () => refresh(S.cur),
   install: ({ cat, tab }) => openInstall({ cat, tab }),
   'toggle-activity': () => { S.activity = !S.activity; invalidate('activity', 'main'); },
@@ -1637,9 +1963,27 @@ const act = {
   'op-log': ({ op }) => { const o = S.opMap.get(op); if (o) { o.showLog = !o.showLog; invalidate('activity'); } },
   'op-cancel': ({ op }) => call('Cancel', op),
   'reveal-backups': () => call('Reveal', ''),
+  'reveal-log': () => call('RevealLog').catch((e) => toast('err', e.message || String(e))),
   about: () => openAbout(),
+  selfupdate: () => { closeModal(false); pushModal('selfupdate', {}); },
+  'update-check': () => checkUpdate(true),
+  'update-install': () => installUpdate(),
+  'update-reveal': () => { const r = topModal()?.data?.result; if (r?.file) call('Reveal', r.file); },
+  settings: () => openSettings(),
+  'set-profiles-auto': async () => {
+    const d = topModal().data;
+    d.busy = true; invalidate('modal');
+    try { d.st = await call('SetProfilesAuto', !d.st.profilesAuto); d.error = ''; } catch (e) { d.error = e.message || String(e); }
+    d.busy = false; invalidate('modal');
+  },
+  'profiles-refresh': async () => {
+    const d = topModal().data;
+    d.busy = d.refreshing = true; d.error = ''; invalidate('modal');
+    try { d.st = await runOp(call('RefreshProfiles')); S.info = await call('Info'); toast('ok', t('t_profilesRefreshed', { date: d.st.profilesUpdated })); } catch (e) { d.error = e.message || String(e); }
+    d.busy = d.refreshing = false; invalidate('modal');
+  },
   'about-toggle': () => { const m = topModal(); if (m?.type === 'about') { m.data.open = !m.data.open; invalidate('modal'); } },
-  lang: async ({ lang: l }) => { setLang(l); await call('SetLang', l).catch(() => {}); S.ops.forEach((o) => { o.title = opTitle(o.kind, o.board, o.folder); }); renderAll(); },
+  lang: async ({ lang: l }) => { setLang(l); await call('SetLang', l).catch(() => {}); call('SetMenuLang', l).catch(() => {}); S.ops.forEach((o) => { o.title = opTitle(o.kind, o.board, o.folder); }); renderAll(); },
   'open-web': ({ url }) => call('OpenURL', url),
   start: ({ folder }) => { const a = appByFolder(folder); boardOp('start', call('Start', S.cur, folder), folder, () => t('t_start', { app: a?.name })).catch(() => {}); },
   stop: async ({ folder }) => {
@@ -1669,8 +2013,10 @@ const act = {
   'net-refresh': () => loadNetwork(topModal().data),
   'wifi-add': ({ phone }) => openWifiAdd(topModal().data, !!phone),
   'wifi-rescan': () => scanWifi(topModal().data, S.cur),
+  'first-setup': () => openFirstSetup(),
   'wifi-pick': ({ ssid }) => { const d = topModal().data; d.ssid = ssid; invalidate('modal'); },
   'wifi-menu': ({ uuid }, el) => wifiMenu(uuid, el),
+  'wifi-connect': ({ uuid }) => wifiConnect(uuid),
   'away-pick': ({ mode }) => pickAway(mode),
   'hotspot-edit': () => editHotspot(),
   'sys-fix': ({ id }) => systemFix(id),
@@ -1680,8 +2026,8 @@ const act = {
   'sys-mode': ({ mode }) => { const d = topModal().data; d.mode = mode; invalidate('modal'); },
   'sys-download': () => { topModal().data.downloadOnly = true; closeModal(true); },
   'sys-recheck': () => { const d = topModal().data; d.log = []; loadSystem(d.board, true, (e) => { if (e.type === 'log') { d.log.push(e.text); invalidate('modal'); } }); },
-  'scan-net': () => scanNet(topModal().data),
-  'pick-found': ({ host }) => { const d = topModal().data; d.host = host; d.addError = ''; invalidate('modal'); },
+  'scan-boards': () => scanBoards(topModal().data),
+  'pick-found': ({ host }) => { const d = topModal().data; d.sel = { kind: 'ssh', host }; d.host = ''; d.addError = ''; invalidate('modal'); },
   'board-more': () => { const d = topModal().data; d.more = !d.more; invalidate('modal'); },
   'rename-board': () => { closeModal(false); openRename(); },
   // modal plumbing
@@ -1693,11 +2039,17 @@ const act = {
   'toggle-show': () => { const d = topModal().data; d.show = !d.show; invalidate('modal'); },
   'board-kind': ({ kind }) => { const d = topModal().data; d.kind = kind; if (kind === 'adb' && d.devices == null) scanUSB(d); invalidate('modal'); },
   'scan-usb': () => scanUSB(topModal().data),
-  'pick-device': ({ serial }) => { const d = topModal().data; d.serial = serial; invalidate('modal'); },
+  'pick-device': ({ serial }) => {
+    const d = topModal().data;
+    if (d.oldName) d.serial = serial;
+    else { d.sel = { kind: 'adb', serial }; d.host = ''; d.addError = ''; }
+    invalidate('modal');
+  },
   'pick-key': async () => { const p = await call('PickKey').catch(() => ''); if (p) { topModal().data.keyFile = p; invalidate('modal'); } },
   'save-board': async () => {
     const d = topModal().data;
-    const t0 = { kind: d.kind, host: (d.host || '').trim(), user: (d.user || 'arduino').trim(), port: parseInt(d.port, 10) || 22, keyFile: (d.keyFile || '').trim(), serial: d.kind === 'adb' ? d.serial || '' : '' };
+    const kind = d.oldName ? d.kind : d.sel?.kind || 'ssh';
+    const t0 = { kind, host: kind === 'adb' ? '' : selHost(d), user: (d.user || 'arduino').trim(), port: parseInt(d.port, 10) || 22, keyFile: (d.keyFile || '').trim(), serial: kind === 'adb' ? (d.oldName ? d.serial : d.sel.serial) || '' : '' };
     if (d.oldName) {
       try { await call('SaveBoard', { ...t0, name: d.oldName }, d.oldName, !!d.makeDefault); closeModal(true); } catch (e) { toast('err', e.message || String(e)); }
       return;
@@ -1705,7 +2057,14 @@ const act = {
     if (t0.kind === 'ssh' && !t0.host) { d.addError = t('hostRequired'); invalidate('modal'); return; }
     // The board is named after itself: connect first (answering any trust/password prompts), then save.
     d.adding = true; d.addError = ''; invalidate('modal');
-    try { d.result = await runOp(call('AddBoard', t0, !!d.makeDefault, !!d.uploadKey)); d.adding = false; closeModal(true); if (d.uploadKey && !S.info?.publicKey) S.info = await call('Info'); } catch (e) { d.adding = false; d.addError = e.cancelled ? '' : e.message || String(e); invalidate('modal'); }
+    try {
+      const fresh = selFresh(d); // the key is offered by the first setup only
+      d.added = t0;
+      d.result = await runOp(call('AddBoard', t0, !!d.makeDefault, !fresh && !!d.uploadKey)); d.adding = false; closeModal(true);
+      // A board found fresh only now skips the upload too; its first setup offers it, ticked as here.
+      if (d.result?.board && !fresh) S.keyChoice = { ...S.keyChoice, [d.result.board]: !!d.uploadKey };
+      if (d.uploadKey && !S.info?.publicKey) S.info = await call('Info');
+    } catch (e) { d.adding = false; d.addError = e.cancelled ? '' : e.message || String(e); invalidate('modal'); }
   },
   'install-tab': ({ tab }) => { const d = topModal().data; d.tab = tab; d.insp = null; d.inspectError = ''; invalidate('modal'); },
   'pick-cat': ({ cat }) => pickCatalog(topModal().data, cat),
@@ -1725,6 +2084,17 @@ const act = {
   'hooks-toggle': () => { const d = topModal()?.data; if (d) { d.hooksOpen = d.hooksOpen === false; invalidate('modal'); } },
   help: ({ topic }, el) => { if (S.menu?.html) closeMenu(); else openPopover(el, helpHtml(topic)); },
   'relay-upstream': () => editRelayUpstream(),
+  // Installs the current hook again (sudo), with the upstream proxy setting as it is.
+  'relay-update': () => { openActivity(); boardOp('relay', call('Relay', S.cur, true, S.relayInfo?.upstream || ''), undefined, () => t('t_relay')).catch(() => {}).finally(loadRelayInfo); },
+  // The proxy address is checked (format, port, something listening) before the dialog closes.
+  'relay-ok': async () => {
+    const d = topModal().data;
+    d.checking = true; d.problem = ''; invalidate('modal');
+    const r = await call('CheckRelayUpstream', (d.upstream || '').trim()).catch((e) => ({ problem: 'format', detail: e.message || String(e) }));
+    d.checking = false;
+    if (r.problem) { d.problem = r.problem; d.detail = r.detail; invalidate('modal'); return; }
+    closeModal(true);
+  },
   takeover: ({ folder }) => {
     const a = appByFolder(folder), upd = S.updates[S.cur]?.[folder];
     const cat = (S.info?.catalog || []).find((p) => p.id === a?.profile?.id);
@@ -1776,7 +2146,13 @@ document.addEventListener('input', (ev) => {
   if (m.type === 'install' && k === 'ref' && m.data.insp) { m.data.insp = null; invalidate('modal'); }
   if (m.type === 'install' && k === 'folder') { const h = el.closest('.field')?.querySelector('.help'); if (h) h.textContent = t('folderHelp', { f: el.value }); }
   if (el.type === 'checkbox' && (m.type === 'system' || m.type === 'mirror' || m.type === 'polcheck')) invalidate('modal');
-  if (m.type === 'board' && k === 'host' && m.data.found) { const fh = m.data.found.some((b) => (b.host || b.ips?.[0]) === el.value.trim()); if (!fh) $$('#modal-root .device.on').forEach((x) => x.classList.remove('on')); }
+  // Skipping the desktop is remembered for the board (the System card counts by it too).
+  if (m.type === 'system' && k === 'skipDesktop') call('SetSkipDesktop', m.data.board, el.checked).then(loadBoards).then(() => invalidate('main')).catch((e) => toast('err', e.message || String(e)));
+  // Typing an address unpicks the board picked in the list.
+  if (m.type === 'board' && k === 'host' && !m.data.oldName && m.data.sel && el.value.trim()) {
+    m.data.sel = null;
+    $$('#modal-root .device.on').forEach((x) => { x.classList.remove('on'); if (x.lastElementChild?.tagName === 'svg') x.lastElementChild.remove(); });
+  }
   if (m.type === 'hotspot' || m.type === 'wifiadd') {
     const [ok, sMsg, pMsg] = netForm(m);
     const b = $('#modal-root [data-act="modal-ok"]'); if (b) b.disabled = !ok;
@@ -1789,6 +2165,18 @@ document.addEventListener('input', (ev) => {
     const v = el.value.trim().toLowerCase(), ok = HOSTNAME_RE.test(v);
     const b = $('#modal-root [data-act="modal-ok"]'); if (b) b.disabled = !ok;
     const h = $('#modal-root .rename-help'); if (h) h.textContent = ok ? t('renameHelp', { name: v }) : t('renameBad');
+  }
+  if (m.type === 'firstsetup') {
+    const [ok, nMsg, pwMsg, again, sMsg, pMsg] = firstSetupForm(m.data);
+    const b = $('#modal-root [data-act="modal-ok"]'); if (b) b.disabled = !ok;
+    for (const [c, v] of [['v-name', nMsg], ['v-pw', pwMsg], ['v-pw2', again], ['v-ssid', sMsg], ['v-psk', pMsg]]) { const h = $('#modal-root .' + c); if (h) h.textContent = v; }
+    if (k === 'ssid') $$('#modal-root .device.on').forEach((x) => x.classList.remove('on'));
+  }
+  if (m.type === 'passwd') {
+    const [ok, msg, again] = passwdForm(m.data);
+    const b = $('#modal-root [data-act="modal-ok"]'); if (b) b.disabled = !ok;
+    const h = $('#modal-root .v-pw'); if (h) h.textContent = msg;
+    const h2 = $('#modal-root .v-pw2'); if (h2) h2.textContent = again;
   }
   if (m.type === 'erase' && k === 'confirm') { const b = $('#modal-root [data-act="do-erase"]'); if (b) b.disabled = el.value !== m.data.app.folder; }
 });
@@ -1803,7 +2191,7 @@ document.addEventListener('keydown', (ev) => {
     if (m) { if (m.type === 'secret' || m.type === 'hostkey') respond(false); else closeModal(false); return; }
     if (S.activity) { S.activity = false; invalidate('activity', 'main'); }
   }
-  if (ev.key === 'Enter' && topModal() && ev.target.tagName !== 'TEXTAREA' && ev.target.tagName !== 'SELECT') {
+  if (ev.key === 'Enter' && !ev.isComposing && ev.keyCode !== 229 && topModal() && ev.target.tagName !== 'TEXTAREA' && ev.target.tagName !== 'SELECT') {
     if (ev.target.dataset?.bind === 'repo') { loadRefs(topModal().data); return; }
     const b = $('#modal-root [data-primary]');
     if (b && !b.disabled) { ev.preventDefault(); b.click(); }
@@ -1814,13 +2202,24 @@ window.addEventListener('resize', closeMenu);
 setInterval(() => { if (S.cur && S.status[S.cur]?.data && !document.hidden && !topModal()) refresh(S.cur); }, 30000);
 
 // ---------------------------------------------------------------- boot
+// The macOS menu bar's Quay menu (internal/gui/menu.go).
+on('quay:menu', (what) => {
+  if (what === 'settings' && topModal()?.type !== 'settings') openSettings();
+  else if (what === 'about' && topModal()?.type !== 'about') openAbout();
+  else if (what === 'update') { if (S.update?.available) pushModal('selfupdate', {}); else { if (topModal()?.type !== 'about') openAbout(); checkUpdate(true); } }
+});
 async function init() {
   S.info = await call('Info');
   S.relayInfo = await call('RelaySettings').catch(() => ({}));
   document.documentElement.dataset.os = S.info.os; // the window chrome differs: see app.css
   setLang(detectLang(S.info.lang));
+  call('SetMenuLang', lang()).catch(() => {});
   await loadBoards();
   renderAll();
   if (S.cur) refresh(S.cur);
+  S.update = await call('UpdateState').catch(() => null);
+  invalidate('sidebar');
+  setTimeout(() => checkUpdate(false), 8000); // then twice a day
+  setInterval(() => checkUpdate(false), 12 * 3600 * 1000);
 }
 init().catch((e) => { document.body.innerHTML = `<pre style="padding:20px">${esc(e.stack || e)}</pre>`; });

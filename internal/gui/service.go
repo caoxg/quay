@@ -18,6 +18,7 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
+	"github.com/caoxg/quay/internal/applog"
 	"github.com/caoxg/quay/internal/board"
 	"github.com/caoxg/quay/internal/config"
 	"github.com/caoxg/quay/internal/core"
@@ -27,6 +28,7 @@ import (
 	"github.com/caoxg/quay/internal/mirror"
 	"github.com/caoxg/quay/internal/profile"
 	"github.com/caoxg/quay/internal/relay"
+	"github.com/caoxg/quay/internal/selfupdate"
 	"github.com/caoxg/quay/internal/source"
 	"github.com/caoxg/quay/internal/version"
 )
@@ -42,6 +44,8 @@ type Service struct {
 	ops      map[string]context.CancelFunc
 	prompts  map[string]chan reply
 	bundles  map[string]*source.Bundle
+	// relayRetry: boards whose relay is wanted and did not start, with when it was last tried
+	relayRetry map[string]time.Time
 }
 
 type reply struct {
@@ -72,18 +76,25 @@ type Prompt struct {
 }
 
 func newService() *Service {
-	hub.Default = &hub.Loader{Dir: config.ProfileCacheDir()}
-	go func() { // a newer copy of the profiles repository, for the boards opened after this
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = hub.Default.Refresh(ctx)
-	}()
+	hub.Default = &hub.Loader{Dir: config.ProfileCacheDir(), Manual: func() bool {
+		cfg, err := config.Load()
+		return err == nil && cfg.ProfilesManual
+	}}
+	if hub.Default.Auto() {
+		go func() { // a newer copy of the profiles repository, for the boards opened after this
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_ = hub.Default.Refresh(ctx)
+		}()
+	}
 	return &Service{
 		sessions: map[string]*core.Session{},
 		cache:    map[string]cached{},
 		ops:      map[string]context.CancelFunc{},
 		prompts:  map[string]chan reply{},
 		bundles:  map[string]*source.Bundle{},
+
+		relayRetry: map[string]time.Time{},
 	}
 }
 
@@ -206,7 +217,7 @@ func (s *Service) SaveBoard(t board.Target, oldName string, makeDefault bool) er
 	if !ok {
 		return fmt.Errorf("no saved board %q", oldName)
 	}
-	t.Name, t.BoardID = old.Name, old.BoardID
+	t.Name, t.BoardID, t.SkipDesktop = old.Name, old.BoardID, old.SkipDesktop
 	if t.Host == old.Host {
 		t.LastIP = old.LastIP
 	}
@@ -217,6 +228,29 @@ func (s *Service) SaveBoard(t board.Target, oldName string, makeDefault bool) er
 	s.dropSession(oldName)
 	s.dropSession(t.Name)
 	return cfg.Save()
+}
+
+// SetSkipDesktop remembers whether the board's system updates leave out the on-board desktop.
+func (s *Service) SetSkipDesktop(name string, skip bool) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	t, ok := cfg.Board(name)
+	if !ok {
+		return fmt.Errorf("no saved board %q", name)
+	}
+	t.SkipDesktop = skip
+	cfg.Put(t)
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if sess := s.sessions[strings.ToLower(name)]; sess != nil {
+		sess.Target.SkipDesktop = skip
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Service) RemoveBoard(name string) error {
@@ -248,14 +282,46 @@ func (s *Service) SetLang(lang string) error {
 }
 
 // USBDevices lists boards connected over USB (adb).
-func (s *Service) USBDevices() ([]board.ADBDevice, error) {
+// USBDevice is a device on USB, with what it says about itself (Setup: whether it had its first
+// setup) and the saved board it is, if any.
+type USBDevice struct {
+	board.ADBDevice
+	Hostname string      `json:"hostname,omitempty"`
+	Model    string      `json:"model,omitempty"`
+	Setup    *core.Setup `json:"setup,omitempty"`
+	Saved    string      `json:"saved,omitempty"`
+}
+
+func (s *Service) USBDevices() ([]USBDevice, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	list, err := board.ADBDevices(ctx)
-	if list == nil {
-		list = []board.ADBDevice{}
+	out := make([]USBDevice, len(list))
+	cfg, _ := config.Load()
+	var wg sync.WaitGroup
+	for i, d := range list {
+		out[i].ADBDevice = d
+		if cfg != nil {
+			if t, ok := cfg.ByBoardID(d.Serial); ok { // a UNO Q's adb serial is its serial number
+				out[i].Saved = t.Name
+			}
+		}
+		if d.State == "device" {
+			wg.Add(1)
+			go func(u *USBDevice) {
+				defer wg.Done()
+				dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+				defer cancel()
+				i := board.ADBDescribe(dctx, u.Serial)
+				u.Hostname, u.Model = i.Hostname, i.Model
+				if i.SSH != "" {
+					u.Setup = &core.Setup{SSHActive: i.SSH == "active", Password: i.Password}
+				}
+			}(&out[i])
+		}
 	}
-	return list, err
+	wg.Wait()
+	return out, err
 }
 
 // Respond answers a prompt.
@@ -385,6 +451,7 @@ func (s *Service) session(ctx context.Context, name string, sink core.Sink) (*co
 	sess := s.sessions[key]
 	s.mu.Unlock()
 	if sess != nil {
+		s.retryRelay(ctx, key, sess)
 		return sess, nil
 	}
 	cfg, err := config.Load()
@@ -405,23 +472,58 @@ func (s *Service) session(ctx context.Context, name string, sink core.Sink) (*co
 	s.mu.Lock()
 	s.sessions[key] = sess
 	s.mu.Unlock()
-	s.maybeRelay(ctx, sess)
+	if s.maybeRelay(ctx, sess) {
+		s.mu.Lock()
+		s.relayRetry[key] = time.Now()
+		s.mu.Unlock()
+	}
 	return sess, nil
 }
 
 // maybeRelay starts relaying the board's downloads through this computer when the board has the
-// hook (Relay on). It lasts as long as the session: while the app is open and connected.
-func (s *Service) maybeRelay(ctx context.Context, sess *core.Session) {
+// hook (Relay on). It lasts as long as the session: while the app is open and connected. It
+// reports whether the relay is wanted (the hook is there) and could not start.
+func (s *Service) maybeRelay(ctx context.Context, sess *core.Session) (failed bool) {
 	out, err := board.Output(ctx, sess.T, "test -f /etc/apt/apt.conf.d/80quay-relay && echo yes || true")
 	if err != nil || strings.TrimSpace(out) != "yes" {
-		return
+		return false
 	}
 	cfg, err := config.Load()
 	if err != nil {
+		return false
+	}
+	up, err := relay.Upstream(cfg.RelayUpstream)
+	if err == nil {
+		err = sess.StartRelay(&relay.Proxy{Upstream: up})
+	}
+	if err != nil {
+		applog.Default.Printf("[relay %s] could not start: %v", sess.Target.Name, err)
+		return true
+	}
+	return false
+}
+
+// retryRelay starts the relay again on a session whose relay is wanted but not running: a session
+// left behind by an earlier Quay can hold the board's relay port until the board's sshd notices
+// it is gone, and a forward ends with its connection. At most every 20 seconds per board.
+func (s *Service) retryRelay(ctx context.Context, key string, sess *core.Session) {
+	s.mu.Lock()
+	due := s.relayRetry[key] != (time.Time{}) && time.Since(s.relayRetry[key]) > 20*time.Second && !sess.RelayActive()
+	if due {
+		s.relayRetry[key] = time.Now()
+	}
+	s.mu.Unlock()
+	if !due {
 		return
 	}
-	if up, err := relay.Upstream(cfg.RelayUpstream); err == nil {
-		_ = sess.StartRelay(&relay.Proxy{Upstream: up})
+	if s.maybeRelay(ctx, sess) {
+		return
+	}
+	s.mu.Lock()
+	delete(s.relayRetry, key)
+	s.mu.Unlock()
+	if sess.RelayActive() {
+		applog.Default.Printf("[relay %s] running again", sess.Target.Name)
 	}
 }
 
@@ -478,12 +580,21 @@ func (s *Service) run(kind, boardName, folder string, fn func(ctx context.Contex
 	s.ops[opID] = cancel
 	s.mu.Unlock()
 	base := OpEvent{Kind: kind, Board: boardName, Folder: folder}
+	tag := "[" + kind
+	if boardName != "" {
+		tag += " " + boardName
+	}
+	if folder != "" {
+		tag += "/" + folder
+	}
+	tag += " " + opID[:6] + "]"
 	send := func(e OpEvent) {
 		e.Kind, e.Board, e.Folder = base.Kind, base.Board, base.Folder
 		e.Op = opID
 		if e.Time == 0 {
 			e.Time = time.Now().UnixMilli()
 		}
+		record(tag, e)
 		s.emit("quay:op", e)
 	}
 	sink := func(e core.Event) { send(OpEvent{Event: e}) }
@@ -526,6 +637,29 @@ func (s *Service) run(kind, boardName, folder string, fn func(ctx context.Contex
 	return opID
 }
 
+// routine operations run by themselves (the board page refreshes its status every 30 seconds):
+// the log keeps only what is out of the ordinary in them, not a begin and an end twice a minute.
+var routine = map[string]bool{"status": true, "check-updates": true, "network": true, "logs": true}
+
+// record writes an operation's event to Quay's log.
+func record(tag string, e OpEvent) {
+	switch {
+	case e.Type == "begin":
+		if !routine[e.Kind] {
+			applog.Default.Printf("%s begin", tag)
+		}
+	case e.Type == "end" && e.Error != "":
+		applog.Default.Printf("%s end %s: %s", tag, e.State, e.Error)
+	case e.Type == "end":
+		if !routine[e.Kind] {
+			applog.Default.Printf("%s end %s", tag, e.State)
+		}
+	case e.Type == "log" && e.Kind == "logs": // the app's own output, for its log viewer
+	default:
+		core.Record(tag, e.Event)
+	}
+}
+
 // ---------------------------------------------------------------- operations (return op ids)
 
 // BoardStatus is a board's status plus its saved name, which follows the board's hostname: when
@@ -533,6 +667,10 @@ func (s *Service) run(kind, boardName, folder string, fn func(ctx context.Contex
 type BoardStatus struct {
 	*core.Status
 	Board string `json:"board"`
+	// Replaced is the saved entry AddBoard took over (same serial number, reached another way
+	// before, e.g. a re-flashed board now on USB), and ReplacedVia how it was reached.
+	Replaced    string `json:"replaced,omitempty"`
+	ReplacedVia string `json:"replacedVia,omitempty"`
 }
 
 func (s *Service) Status(boardName string) string {
@@ -598,8 +736,12 @@ func (s *Service) AddBoard(t board.Target, makeDefault, uploadKey bool) string {
 			sess.Close()
 			return nil, err
 		}
+		var replaced, via string
 		if old, ok := cfg.ByBoardID(st.Serial); ok {
-			t.Name = old.Name
+			t.Name, t.SkipDesktop = old.Name, old.SkipDesktop
+			if old.String() != t.String() {
+				replaced, via = old.Name, old.String()
+			}
 		} else {
 			t.Name = cfg.UniqueName(st.Hostname, st.Serial)
 		}
@@ -613,7 +755,8 @@ func (s *Service) AddBoard(t board.Target, makeDefault, uploadKey bool) string {
 			return nil, err
 		}
 		sess.Target, _ = cfg.Board(name)
-		if uploadKey {
+		// A fresh board gets the key in its first setup, which asks again with this choice.
+		if uploadKey && !st.Setup.Needed() {
 			if _, line, err := localOrNewKey(t.KeyFile, true); err == nil {
 				if _, err := sess.UploadKey(ctx, sink, line); err == nil {
 					st, _ = sess.Status(ctx) // shows the key as uploaded
@@ -625,7 +768,7 @@ func (s *Service) AddBoard(t board.Target, makeDefault, uploadKey bool) string {
 		s.sessions[strings.ToLower(name)] = sess
 		s.mu.Unlock()
 		s.maybeRelay(ctx, sess)
-		return BoardStatus{Status: st, Board: name}, nil
+		return BoardStatus{Status: st, Board: name, Replaced: replaced, ReplacedVia: via}, nil
 	})
 }
 
@@ -668,6 +811,13 @@ func localOrNewKey(keyFile string, generate bool) (string, string, error) {
 	return path, line, err
 }
 
+// SetPassword sets the board user's password (no current password needed; see core.SetPassword).
+func (s *Service) SetPassword(boardName, pw string) string {
+	return s.run("passwd", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.SetPassword(ctx, sink, pw)
+	})
+}
+
 // Rename renames the board itself (its hostname); the saved board follows.
 func (s *Service) Rename(boardName, newName string) string {
 	return s.run("rename", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
@@ -689,10 +839,35 @@ func (s *Service) SystemCheck(boardName string, refresh bool) string {
 	})
 }
 
-// SystemUpdate installs the board's system updates.
+// SystemCheckAuto is SystemCheck for the board page: it refreshes missing or old package lists
+// by itself when the board allows that without a password (core.CheckUpgradesFresh).
+func (s *Service) SystemCheckAuto(boardName string) string {
+	return s.run("syscheck", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return sess.CheckUpgradesFresh(ctx, sink)
+	})
+}
+
+// SystemUpdate installs the board's system updates. When the update's service restarts drop the
+// connection, it reconnects as soon as the board answers and follows the update to its end.
 func (s *Service) SystemUpdate(boardName string, opt core.UpgradeOptions) string {
 	return s.run("sysupdate", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
-		return sess.Upgrade(ctx, sink, opt)
+		res, err := sess.Upgrade(ctx, sink, opt)
+		if !errors.Is(err, core.ErrDropped) {
+			return res, err
+		}
+		sink(core.Event{Type: "warn", Text: "The connection dropped: the update restarts the board's services (sshd among them). Reconnecting…", Time: time.Now().UnixMilli()})
+		s.dropSession(boardName)
+		for end := time.Now().Add(90 * time.Second); time.Now().Before(end); {
+			if ns, cerr := s.session(ctx, boardName, sink); cerr == nil {
+				return ns.FollowUpgrade(ctx, sink, opt)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
+		}
+		return nil, err
 	})
 }
 
@@ -703,10 +878,29 @@ type RelayInfo struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// RelayCheck is what is wrong with a proxy address typed for the relay, if anything (relay.Check).
+type RelayCheck struct {
+	Problem string `json:"problem,omitempty"` // format | scheme | port | unreachable
+	Detail  string `json:"detail,omitempty"`
+}
+
+// CheckRelayUpstream checks a proxy address before it is saved.
+func (s *Service) CheckRelayUpstream(upstream string) RelayCheck {
+	p, d := relay.Check(upstream)
+	return RelayCheck{Problem: p, Detail: d}
+}
+
+func relayCheckErr(upstream string) error {
+	if p, d := relay.Check(upstream); p != "" {
+		return fmt.Errorf("proxy %q: %s (%s)", strings.TrimSpace(upstream), p, d)
+	}
+	return nil
+}
+
 // SetRelayUpstream changes the proxy the relay chains through; relays running now switch at once.
 func (s *Service) SetRelayUpstream(upstream string) (RelayInfo, error) {
 	upstream = strings.TrimSpace(upstream)
-	if _, err := relay.Upstream(upstream); err != nil {
+	if err := relayCheckErr(upstream); err != nil {
 		return RelayInfo{}, err
 	}
 	cfg, err := config.Load()
@@ -753,7 +947,7 @@ func (s *Service) RelaySettings() RelayInfo {
 func (s *Service) Relay(boardName string, on bool, upstream string) string {
 	return s.run("relay", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
 		if on {
-			if _, err := relay.Upstream(upstream); err != nil {
+			if err := relayCheckErr(upstream); err != nil {
 				return nil, err
 			}
 			cfg, err := config.Load()
@@ -806,6 +1000,13 @@ func (s *Service) WifiPhone(boardName, uuid string, phone bool) string {
 	})
 }
 
+// WifiConnect switches the board to a saved Wi-Fi network now.
+func (s *Service) WifiConnect(boardName, uuid string) string {
+	return s.run("wifi", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
+		return nil, sess.WifiConnect(ctx, sink, uuid)
+	})
+}
+
 // WifiRemove deletes a saved Wi-Fi network by its profile uuid.
 func (s *Service) WifiRemove(boardName, uuid string) string {
 	return s.run("wifi", boardName, "", func(ctx context.Context, sess *core.Session, sink core.Sink) (any, error) {
@@ -838,6 +1039,151 @@ func (s *Service) HotspotNow(boardName string, open bool) string {
 		s.dropSession(boardName)
 		return nil, nil
 	})
+}
+
+// ---------------------------------------------------------------- settings
+
+// Settings is what the Settings dialog shows.
+type Settings struct {
+	ProfilesAuto    bool   `json:"profilesAuto"`    // fetch newer profiles by themselves
+	ProfilesUpdated string `json:"profilesUpdated"` // the date of the copy in use
+	ProfilesSource  string `json:"profilesSource"`  // "built in", or where it was fetched from
+	LogDir          string `json:"logDir"`          // where Quay's log is written
+}
+
+// Settings returns the settings and the profiles copy in use.
+func (s *Service) Settings() Settings {
+	snap := hub.Get()
+	return Settings{ProfilesAuto: hub.Default.Auto(), ProfilesUpdated: snap.Index.Updated, ProfilesSource: snap.Source, LogDir: applog.Default.Dir()}
+}
+
+// RevealLog shows today's log file in the system file manager, or the log folder before anything
+// was written today.
+func (s *Service) RevealLog() error {
+	p := applog.Default.Path()
+	if _, err := os.Stat(p); err != nil {
+		p = applog.Default.Dir()
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			return err
+		}
+	}
+	return s.Reveal(p)
+}
+
+// SetProfilesAuto turns fetching newer profiles by themselves on or off.
+func (s *Service) SetProfilesAuto(on bool) (Settings, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return Settings{}, err
+	}
+	cfg.ProfilesManual = !on
+	if err := cfg.Save(); err != nil {
+		return Settings{}, err
+	}
+	return s.Settings(), nil
+}
+
+// RefreshProfiles fetches the newest profiles now (whatever the setting says).
+func (s *Service) RefreshProfiles() string {
+	return s.run("profiles", "", "", func(ctx context.Context, _ *core.Session, _ core.Sink) (any, error) {
+		if err := hub.Default.Refresh(ctx); err != nil {
+			return nil, err
+		}
+		return s.Settings(), nil
+	})
+}
+
+// ---------------------------------------------------------------- Quay's own updates
+
+// UpdateState is what the app shows about a newer Quay: from the last check (no network).
+type UpdateState struct {
+	Current   string              `json:"current"`
+	Dev       bool                `json:"dev"` // a development build: nothing is offered
+	Checked   int64               `json:"checked"`
+	Available bool                `json:"available"`
+	Latest    *selfupdate.Release `json:"latest,omitempty"`
+	Kind      string              `json:"kind"` // how this Quay is installed (selfupdate.Kind…)
+	Path      string              `json:"path"`
+	Size      int64               `json:"size,omitempty"` // of the download, when known
+	Error     string              `json:"error,omitempty"`
+}
+
+func (s *Service) updateState(c *selfupdate.Check) UpdateState {
+	st := UpdateState{Current: version.Version, Dev: version.Version == "dev"}
+	if t, err := selfupdate.New().Where(); err == nil {
+		st.Kind, st.Path = t.Kind, t.Path
+	}
+	if c != nil {
+		st.Checked, st.Latest, st.Error = c.Checked.UnixMilli(), c.Latest, c.Error
+		st.Available = !st.Dev && c.Available()
+		if c.Latest != nil {
+			st.Size = c.Latest.Size(selfupdate.AssetName(st.Kind, c.Latest.Version))
+		}
+	}
+	return st
+}
+
+// UpdateState returns the last check.
+func (s *Service) UpdateState() UpdateState {
+	return s.updateState(selfupdate.LoadCheck(selfupdate.CheckFile()))
+}
+
+// CheckUpdate asks GitHub for the newest release, unless the last check is recent (force: always).
+func (s *Service) CheckUpdate(force bool) string {
+	return s.run("updatecheck", "", "", func(ctx context.Context, _ *core.Session, _ core.Sink) (any, error) {
+		file := selfupdate.CheckFile()
+		c := selfupdate.LoadCheck(file)
+		if force || c == nil || time.Since(c.Checked) > 12*time.Hour {
+			rel, err := selfupdate.New().Latest(ctx)
+			c = &selfupdate.Check{Checked: time.Now(), Current: version.Version, Latest: rel}
+			if err != nil {
+				c.Error = err.Error()
+			}
+			_ = c.Save(file)
+		}
+		return s.updateState(c), nil
+	})
+}
+
+// InstallUpdate downloads, verifies and installs the release the last check found. The result
+// says whether to Relaunch, or what is left for the user (the .deb).
+func (s *Service) InstallUpdate() string {
+	return s.run("selfupdate", "", "", func(ctx context.Context, _ *core.Session, sink core.Sink) (any, error) {
+		c := selfupdate.LoadCheck(selfupdate.CheckFile())
+		if c == nil || !c.Available() {
+			return nil, errors.New("no newer Quay to install")
+		}
+		text := "Download, verify and install Quay " + c.Latest.Version
+		sink(core.Event{Type: "step", Step: "selfupdate", State: "run", Text: text})
+		res, err := selfupdate.New().Install(ctx, c.Latest, func(done, total int64) {
+			pct := 0.0
+			if total > 0 {
+				pct = 100 * float64(done) / float64(total)
+			}
+			sink(core.Event{Type: "progress", Step: "selfupdate", Data: map[string]any{"percent": pct, "done": done, "total": total, "unit": "bytes"}})
+		})
+		if err != nil {
+			sink(core.Event{Type: "step", Step: "selfupdate", State: "fail", Text: err.Error()})
+			return nil, err
+		}
+		sink(core.Event{Type: "step", Step: "selfupdate", State: "ok", Text: text})
+		return res, nil
+	})
+}
+
+// Relaunch starts the updated Quay once this one has quit, and quits.
+func (s *Service) Relaunch() error {
+	t, err := selfupdate.New().Where()
+	if err != nil {
+		return err
+	}
+	if err := selfupdate.Relaunch(t); err != nil {
+		return err
+	}
+	if s.app != nil {
+		go s.app.Quit()
+	}
+	return nil
 }
 
 // SystemFix applies a system profile finding's built-in action (see core.SystemFix).

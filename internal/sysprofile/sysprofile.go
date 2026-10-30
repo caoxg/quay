@@ -68,6 +68,15 @@ type Profile struct {
 	Version       *Field  `yaml:"version" json:"-"`
 	Base          *Field  `yaml:"base" json:"-"`
 	Notes         []*Note `yaml:"notes" json:"-"`
+	// Hotspot is the system's own hotspot, set up by its own tools (Duck Setup on Duck OS): Quay
+	// shows whether it comes up by itself, since it then decides how the board is reached away
+	// from Wi-Fi.
+	Hotspot *OwnHotspot `yaml:"hotspot" json:"-"`
+}
+
+// OwnHotspot identifies a system's own hotspot among the saved NetworkManager profiles.
+type OwnHotspot struct {
+	NMProfile NMMatch `yaml:"nm_profile"`
 }
 
 // Detect identifies the system: every file listed exists.
@@ -157,6 +166,12 @@ func Parse(b []byte) (*Profile, []error) {
 				errs = append(errs, fmt.Errorf("%s: bad field %+v", p.ID, *f))
 				*fld = nil
 			}
+		}
+	}
+	if h := p.Hotspot; h != nil {
+		if m := h.NMProfile; m.ID == "" && m.IDPrefix == "" && m.SSID == "" {
+			errs = append(errs, fmt.Errorf("%s: hotspot.nm_profile needs an id, id_prefix or ssid", p.ID))
+			p.Hotspot = nil
 		}
 	}
 	var notes []*Note
@@ -315,6 +330,33 @@ func (f Facts) value(fld *Field) string {
 		return strconv.FormatBool(v)
 	}
 	return ""
+}
+
+// HotspotState is a system's own hotspot found on the board.
+type HotspotState struct {
+	System      string `json:"system"` // the system's name
+	SystemZh    string `json:"systemZh,omitempty"`
+	SSID        string `json:"ssid"`
+	Autoconnect bool   `json:"autoconnect"` // comes up by itself (at boot, ahead of Wi-Fi)
+	Active      bool   `json:"active"`
+}
+
+// OwnHotspotState finds the system's own hotspot among the saved profiles (nil: none, or the
+// profiles were not read). With several, one that comes up by itself wins.
+func (p *Profile) OwnHotspotState(f Facts) *HotspotState {
+	if p.Hotspot == nil {
+		return nil
+	}
+	var out *HotspotState
+	for _, nm := range f.Profiles {
+		if !p.Hotspot.NMProfile.matches(nm) {
+			continue
+		}
+		if out == nil || (nm.Autoconnect && !out.Autoconnect) {
+			out = &HotspotState{System: p.Name, SystemZh: p.NameZh, SSID: nm.SSID, Autoconnect: nm.Autoconnect, Active: nm.Active}
+		}
+	}
+	return out
 }
 
 // Finding is a note whose condition holds on this board.

@@ -273,6 +273,27 @@ netcfg forget "$UUID"
 echo "removed"
 `
 
+// WifiConnect switches the board to a saved Wi-Fi ($UUID) now, unless a scan shows it out of range.
+// The switch starts a few seconds after this script returns: Quay is usually connected through the
+// network the board leaves. If joining fails, NetworkManager goes back to a saved network in range.
+const WifiConnect = `
+IFACE=wlan0
+[ "$(nmcli -g GENERAL.CON-UUID device show "$IFACE" 2>/dev/null)" = "$UUID" ] && { echo "the board is on this network already"; exit 0; }
+ssid=$(nmcli -g 802-11-wireless.ssid connection show uuid "$UUID" 2>/dev/null) || { echo "no saved network $UUID" >&2; exit 1; }
+# A hidden network is not in the scan, and a board running a hotspot does not scan: no check then.
+cur=$(nmcli -g GENERAL.CON-UUID device show "$IFACE" 2>/dev/null || true)
+curmode=$([ -n "$cur" ] && nmcli -g 802-11-wireless.mode connection show uuid "$cur" 2>/dev/null || true)
+if [ "$(nmcli -g 802-11-wireless.hidden connection show uuid "$UUID")" != yes ] && [ "$curmode" != ap ]; then
+  seen=$(timeout 45 nmcli -t -f SSID device wifi list ifname "$IFACE" --rescan yes 2>/dev/null || true)
+  if [ -n "$seen" ] && ! printf '%s\n' "$seen" | grep -Fxq -- "$ssid"; then  # both escaped alike by nmcli
+    echo "\"$ssid\" is not in range" >&2
+    exit 1
+  fi
+fi
+systemd-run --quiet --on-active=3 nmcli connection up uuid "$UUID"
+echo "the board joins \"$ssid\" in a few seconds"
+`
+
 // HotspotSettings saves the board's own hotspot: the quay-hotspot NetworkManager profile ($SECRETS:
 // name and password; an empty password keeps the old one). It never opens it.
 const HotspotSettings = `

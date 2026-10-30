@@ -3,6 +3,23 @@
 # and reports Quay's own units (quay-*) as enabled and active while their unit file is installed.
 echo "$(id -un): systemctl $*" >> /var/log/fake-systemctl.log
 unit="${*: -1}"
+# ssh and avahi-daemon are enabled and running unless a test marks them off (a fresh image):
+# /var/lib/fake-systemd/UNIT.disabled and UNIT.inactive.
+ST=/var/lib/fake-systemd
+u="${unit%.service}"
+case "$u" in
+  ssh|avahi-daemon)
+    case "$1" in
+      is-enabled|is-active)
+        off=disabled on=enabled; [ "$1" = is-active ] && off=inactive on=active
+        if [ -e "$ST/$u.$off" ]; then [ "$2" = --quiet ] || echo "$off"; exit 3; fi
+        [ "$2" = --quiet ] || echo "$on"; exit 0 ;;
+      enable) rm -f "$ST/$u.disabled"; exit 0 ;;
+      disable) mkdir -p "$ST"; touch "$ST/$u.disabled"; exit 0 ;;
+      start|restart) rm -f "$ST/$u.inactive"; exit 0 ;;
+      stop) mkdir -p "$ST"; touch "$ST/$u.inactive"; exit 0 ;;
+    esac ;;
+esac
 case "$1" in
   cat) printf '[Service]\nExecStart=/usr/bin/arduino-router --serial-baudrate 115200\n' ;;
   show) grep -h ExecStart= /etc/systemd/system/arduino-router.service.d/*.conf 2>/dev/null | tail -1 ;;

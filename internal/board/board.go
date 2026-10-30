@@ -47,6 +47,9 @@ type Target struct {
 	// LastIP is the board's last known IPv4 address, tried when Host (usually NAME.local) does not
 	// resolve.
 	LastIP string `json:"lastIp,omitempty"`
+	// SkipDesktop is a choice remembered for this board: its system updates leave out the on-board
+	// desktop (App Lab, Chromium), which a board used from a computer does not need.
+	SkipDesktop bool `json:"skipDesktop,omitempty"`
 }
 
 // ParseTarget accepts "user@host[:port]", "ssh://user@host:port", "host", "adb" and "adb:SERIAL".

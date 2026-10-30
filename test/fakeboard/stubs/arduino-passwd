@@ -1,0 +1,10 @@
+#!/bin/bash
+# As on the UNO Q image (/usr/local/bin/arduino-passwd, from the arduino-app-cli package): sets the
+# password of the user with uid 1000 from a line on standard input.
+
+read -s "pass"
+[ -n "$pass" ] || exit 1
+
+user=$(getent passwd 1000 | cut -d: -f1)
+
+echo "$user:$pass" | chpasswd

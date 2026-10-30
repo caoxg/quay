@@ -6,9 +6,13 @@ import (
 	"os"
 
 	"github.com/caoxg/quay/internal/cli"
+	"github.com/caoxg/quay/internal/selfupdate"
 )
 
 func main() {
+	selfupdate.HasGUI = guiAvailable
+	selfupdate.WaitForPrevious() // started by a self-update: let the old program exit first
+	selfupdate.Cleanup()
 	// No arguments: open the app (when built with the GUI). Otherwise behave as a CLI.
 	if len(os.Args) == 1 && guiAvailable {
 		if err := runGUI(); err != nil {

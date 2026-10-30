@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -20,19 +22,53 @@ type ADB struct {
 	serial string
 }
 
-// ADBPath finds adb.
+// ADBPath finds adb: QUAY_ADB, else the one on PATH, else (when that is missing or too old) the
+// usual places of Android Studio's SDK and Homebrew.
 func ADBPath() (string, error) {
 	if p := os.Getenv("QUAY_ADB"); p != "" {
 		return p, nil
 	}
-	p, err := exec.LookPath("adb")
-	if err != nil {
-		return "", errors.New("adb not found: install Android platform-tools (macOS: brew install android-platform-tools) or use SSH")
+	var tooOld error
+	if p, err := exec.LookPath("adb"); err == nil {
+		if tooOld = checkADBVersion(p); tooOld == nil {
+			return p, nil
+		}
 	}
-	if err := checkADBVersion(p); err != nil {
-		return "", err
+	for _, p := range adbPlaces() {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && checkADBVersion(p) == nil {
+			return p, nil
+		}
 	}
-	return p, nil
+	if tooOld != nil {
+		return "", tooOld
+	}
+	return "", errors.New("adb not found: install Android platform-tools (macOS: brew install android-platform-tools) or use SSH")
+}
+
+// adbPlaces lists where adb usually is when it is not on PATH.
+func adbPlaces() []string {
+	exe := "adb"
+	if runtime.GOOS == "windows" {
+		exe = "adb.exe"
+	}
+	var ps []string
+	for _, env := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
+		if d := os.Getenv(env); d != "" {
+			ps = append(ps, filepath.Join(d, "platform-tools", exe))
+		}
+	}
+	home, _ := os.UserHomeDir()
+	switch runtime.GOOS {
+	case "darwin":
+		ps = append(ps, filepath.Join(home, "Library", "Android", "sdk", "platform-tools", exe), "/opt/homebrew/bin/adb", "/usr/local/bin/adb")
+	case "linux":
+		ps = append(ps, filepath.Join(home, "Android", "Sdk", "platform-tools", exe), "/usr/lib/android-sdk/platform-tools/adb", "/usr/bin/adb")
+	case "windows":
+		if d := os.Getenv("LOCALAPPDATA"); d != "" {
+			ps = append(ps, filepath.Join(d, "Android", "Sdk", "platform-tools", exe))
+		}
+	}
+	return ps
 }
 
 var adbVersionRe = regexp.MustCompile(`version 1\.0\.(\d+)`)
@@ -78,6 +114,40 @@ func ADBDevices(ctx context.Context) ([]ADBDevice, error) {
 		list = append(list, ADBDevice{Serial: f[0], State: f[1]})
 	}
 	return list, nil
+}
+
+// ADBInfo is what a USB device says about itself; all empty when it does not answer.
+type ADBInfo struct {
+	Hostname string
+	Model    string
+	SSH      string // systemctl is-active ssh: active, inactive…
+	Password string // passwd -S on its own account: P usable, L locked, NP none
+}
+
+// ADBDescribe asks a USB device about itself, as its user (no root needed).
+func ADBDescribe(ctx context.Context, serial string) ADBInfo {
+	bin, err := ADBPath()
+	if err != nil {
+		return ADBInfo{}
+	}
+	out, err := exec.CommandContext(ctx, bin, "-s", serial, "shell",
+		`hostname; tr -d '\0' </proc/device-tree/model 2>/dev/null; echo; systemctl is-active ssh 2>/dev/null; passwd -S 2>/dev/null`).Output()
+	if err != nil {
+		return ADBInfo{}
+	}
+	return parseADBInfo(string(out))
+}
+
+func parseADBInfo(out string) ADBInfo {
+	l := strings.Split(strings.ReplaceAll(out, "\r", ""), "\n")
+	for len(l) < 4 {
+		l = append(l, "")
+	}
+	i := ADBInfo{Hostname: strings.TrimSpace(l[0]), Model: strings.TrimSpace(l[1]), SSH: strings.TrimSpace(l[2])}
+	if f := strings.Fields(l[3]); len(f) > 1 {
+		i.Password = f[1]
+	}
+	return i
 }
 
 // OpenADB picks the device (the only one, or t.Serial).

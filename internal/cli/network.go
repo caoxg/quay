@@ -90,13 +90,20 @@ func wifiCmd() *cobra.Command {
 		},
 	}
 	set.Flags().BoolVar(&setPhone, "phone", false, "a phone's hotspot (false: an ordinary Wi-Fi)")
+	connect := &cobra.Command{Use: "connect NAME", Short: "Switch the board to a saved network now (Quay loses the board unless this computer is on it too)",
+		Example: "  quay wifi connect \"Wei's iPhone\"   # try the phone hotspot at home; turn it off to send the board back", Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, a []string) error {
+			return withProfile(a[0], func(ctx context.Context, s *core.Session, sink core.Sink, p core.WifiProfile) error {
+				return s.WifiConnect(ctx, sink, p.UUID)
+			})
+		}}
 	rm := &cobra.Command{Use: "rm NAME", Short: "Remove a saved Wi-Fi network (not the one in use)", Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, a []string) error {
 			return withProfile(a[0], func(ctx context.Context, s *core.Session, sink core.Sink, p core.WifiProfile) error {
 				return s.WifiRemove(ctx, sink, p.UUID)
 			})
 		}}
-	c.AddCommand(ls, scan, add, set, rm)
+	c.AddCommand(ls, scan, add, set, connect, rm)
 	return c
 }
 

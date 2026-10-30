@@ -26,6 +26,9 @@ type NetSummary struct {
 	Ours       bool   `json:"ours"`               // ... its own, the one Quay set up
 	Away       string `json:"away"`               // the away plan: off | own | phone | both
 	Stations   *int   `json:"stations,omitempty"` // devices on the board's own hotspot, when known
+	// SystemHotspot is the board system's own hotspot (another tool's, e.g. Duck Setup on Duck OS),
+	// when a system profile names one and it is saved on the board.
+	SystemHotspot *sysprofile.HotspotState `json:"systemHotspot,omitempty"`
 }
 
 // Away plans: how the board stays reachable away from its ordinary saved Wi-Fi.
@@ -264,6 +267,18 @@ func (s *Session) WifiRemove(ctx context.Context, sink Sink, uuid string) error 
 	o := s.op(ctx, sink)
 	return o.step("wifi", "Remove a saved Wi-Fi", func() error {
 		return o.sudo("Remove Wi-Fi", remote.WifiRemove, map[string]string{"UUID": uuid})
+	})
+}
+
+// WifiConnect switches the board to a saved Wi-Fi network now (refused when a scan shows it out of
+// range). The board leaves its current network a few seconds after this returns.
+func (s *Session) WifiConnect(ctx context.Context, sink Sink, uuid string) error {
+	if err := validUUID(uuid); err != nil {
+		return err
+	}
+	o := s.op(ctx, sink)
+	return o.step("wifi", "Join a saved Wi-Fi now", func() error {
+		return o.sudo("Join Wi-Fi", remote.WifiConnect, map[string]string{"UUID": uuid})
 	})
 }
 

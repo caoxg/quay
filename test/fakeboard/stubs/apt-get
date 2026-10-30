@@ -66,8 +66,10 @@ elif cmd == "install" and "--only-upgrade" in opts and "-d" in opts:
     DB.write_text(json.dumps(db, indent=1))
 elif cmd == "install" and "--only-upgrade" in opts:
     need_root()
+    status = "APT::Status-Fd=1" in opts
     done = []
-    for name in words[1:]:
+    names = words[1:]
+    for i, name in enumerate(names, 1):
         p = db["packages"].get(name)
         if not p or name not in db["installed"]:
             print(f"Skipping {name}, it is not installed"); continue
@@ -76,6 +78,8 @@ elif cmd == "install" and "--only-upgrade" in opts:
         if f"{name}_{p['version']}" not in db.get("cached", []):
             print(f"Get: {p['uri']} [{p['size']} B]")
         print(f"Unpacking {name} ({p['version']}) over ({db['installed'][name]}) ...")
+        if status:  # apt's own status line, written at once (the text above is buffered on a real board)
+            print(f"pmstatus:{name}:{100 * i / (len(names) + 1):.4f}:Unpacking {name} (arm64)", flush=True)
         db["installed"][name] = p["version"]
         done.append(name)
         for dep, q in db["packages"].items():
@@ -85,8 +89,10 @@ elif cmd == "install" and "--only-upgrade" in opts:
     for name in done:
         print(f"Setting up {name} ({db['packages'][name]['version']}) ...")
     DB.write_text(json.dumps(db, indent=1))
-elif cmd == "clean":
+elif cmd == "clean":  # empties the cache of downloaded debs, as apt does
     need_root()
+    db["cached"] = []
+    DB.write_text(json.dumps(db, indent=1))
 else:
     print("fake apt-get: unsupported: " + " ".join(args), file=sys.stderr)
     sys.exit(100)

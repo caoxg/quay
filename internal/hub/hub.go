@@ -117,6 +117,7 @@ type Loader struct {
 	Dir    string
 	Client *http.Client
 	TTL    time.Duration // how old the copy may get before Current fetches again (default 12 h)
+	Manual func() bool   // true: fetch only when asked (Refresh), never by itself
 
 	mu     sync.Mutex
 	last   time.Time // last fetch attempt
@@ -271,6 +272,11 @@ func (l *Loader) get(ctx context.Context, u string) ([]byte, error) {
 	return b, err
 }
 
+func (l *Loader) manual() bool { return l.Manual != nil && l.Manual() }
+
+// Auto reports whether the loader fetches newer copies by itself.
+func (l *Loader) Auto() bool { return !l.manual() }
+
 // Default is the loader Get and Current use; nil means the built-in copy only. The CLI and the app
 // set it.
 var Default *Loader
@@ -295,7 +301,7 @@ func Get() *Snapshot {
 // Current is Get after fetching a fresh copy when the kept one is stale (for at most a few
 // seconds; failing that, the kept or built-in copy is used).
 func Current(ctx context.Context) *Snapshot {
-	if Default != nil && os.Getenv("QUAY_PROFILES") == "" && Default.Stale() {
+	if Default != nil && os.Getenv("QUAY_PROFILES") == "" && !Default.manual() && Default.Stale() {
 		ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		_ = Default.Refresh(ctx)
 		cancel()

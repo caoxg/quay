@@ -14,6 +14,12 @@ version:
 base:
   file: /etc/duck-release.json
   json: base_version
+# Duck Setup's hotspot: shown on the network card ("Duck OS controls it"), as it decides how the
+# board is reached away from Wi-Fi while it comes up by itself.
+hotspot:
+  nm_profile:
+    id_prefix: Duck-Setup-hotspot-
+    mode: ap
 notes:
   # Duck Setup's hotspot (/usr/local/lib/duck/configure-network.py): a profile
   # "Duck-Setup-hotspot-<uuid8>", an access point on 10.42.0.1 that comes up by itself with

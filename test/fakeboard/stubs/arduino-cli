@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""Stand-in for arduino-cli on the fake board: only the index updates Quay calls."""
+import json, pathlib, sys
+
+DATA = pathlib.Path.home() / ".arduino15"
+# What the Arduino servers list beyond the build-day indexes the image ships (stubs/arduino15).
+NEWER = [{"name": "Arduino_RouterBridge", "version": "0.4.3"}, {"name": "Arduino_RPClite", "version": "0.3.1"}]
+
+with open("/tmp/fake-arduino-cli.log", "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+
+args = sys.argv[1:]
+if args == ["lib", "update-index"]:
+    p = DATA / "library_index.json"
+    index = json.loads(p.read_text())
+    index["libraries"] += [l for l in NEWER if l not in index["libraries"]]
+    p.write_text(json.dumps(index))
+    print("Downloading index: library_index.tar.bz2 downloaded")
+elif args == ["core", "update-index"]:
+    print("Downloading index: package_index.tar.bz2 downloaded")
+else:
+    sys.exit("fake arduino-cli: unsupported: " + " ".join(args))

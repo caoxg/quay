@@ -141,7 +141,7 @@ func (s *Session) Relay(ctx context.Context, sink Sink, on bool) error {
 		})
 	}
 	return o.step("relay", "Download through this computer while Quay is connected", func() error {
-		return o.sudo("Relay on", remote.RelayOn, map[string]string{"PORT": strconv.Itoa(relay.Port)})
+		return o.sudo("Relay on", remote.RelayOn, map[string]string{"PORT": strconv.Itoa(relay.Port), "PROBE": relay.ProbeHost})
 	})
 }
 

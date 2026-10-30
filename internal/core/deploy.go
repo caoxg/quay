@@ -98,6 +98,9 @@ func (s *Session) Deploy(ctx context.Context, sink Sink, b *source.Bundle, opt D
 	if err := ValidFolder(folder); err != nil {
 		return nil, err
 	}
+	if err := o.clock(); err != nil { // the app's first start downloads its packages
+		return nil, err
+	}
 	res := &DeployResult{Folder: folder, Commit: b.Commit, Profile: prof}
 
 	var st *Status
@@ -180,6 +183,15 @@ func (s *Session) Deploy(ctx context.Context, sink Sink, b *source.Bundle, opt D
 	}); err != nil {
 		return nil, err
 	}
+	if err := o.step("indexes", "Check the board's library index has the sketch's pinned versions", func() error {
+		out, err := o.run(remote.Script(remote.Indexes, map[string]string{"FOLDER": folder}), func(l string) bool { return l != "QUAY_NOSKETCH" })
+		if err == nil && strings.Contains(out, "QUAY_NOSKETCH") {
+			return errSkip
+		}
+		return err
+	}); err != nil {
+		return nil, err
+	}
 	if err := o.step("before_start", "Run the app's preparation hook", func() error {
 		if prof == nil || prof.BeforeStart == nil || strings.TrimSpace(prof.BeforeStart.Run) == "" {
 			return errSkip
@@ -191,7 +203,12 @@ func (s *Session) Deploy(ctx context.Context, sink Sink, b *source.Bundle, opt D
 		out, err := o.run(remote.Script(remote.BeforeStart, map[string]string{
 			"FOLDER": folder, "RUN": prof.BeforeStart.Run, "RESOLVE": resolve,
 			"GLOBS": strings.Join(prof.BeforeStart.RebuildWhenChanged, " "),
-		}), func(l string) bool { return l != "QUAY_REBUILD" })
+		}), func(l string) bool {
+			if strings.HasPrefix(l, "first build:") {
+				o.info("First build of this sketch on the board: App CLI downloads the microcontroller's build tools (about 100 MB), builds and flashes the firmware, then builds it again after the hook. This takes 10 to 20 minutes.", map[string]string{"note": "firstBuild"})
+			}
+			return l != "QUAY_REBUILD"
+		})
 		if strings.Contains(out, "QUAY_REBUILD") {
 			res.Rebuilt = true
 			o.info("hook changed build inputs: the sketch will be rebuilt", nil)

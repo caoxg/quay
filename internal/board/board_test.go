@@ -75,3 +75,16 @@ func TestGenerateKey(t *testing.T) {
 		t.Fatal("an existing key must not be replaced")
 	}
 }
+
+func TestParseADBInfo(t *testing.T) {
+	fresh := parseADBInfo("uno-q\r\nArduino UnoQ\r\ninactive\r\narduino L 2026-05-28 0 99999 7 -1\r\n")
+	if fresh != (ADBInfo{Hostname: "uno-q", Model: "Arduino UnoQ", SSH: "inactive", Password: "L"}) {
+		t.Errorf("fresh board: %+v", fresh)
+	}
+	if set := parseADBInfo("duck\nArduino UnoQ\nactive\narduino P 2026-10-27 0 99999 7 -1\n"); set.SSH != "active" || set.Password != "P" {
+		t.Errorf("set-up board: %+v", set)
+	}
+	if odd := parseADBInfo("phone\n"); odd.Hostname != "phone" || odd.SSH != "" || odd.Password != "" {
+		t.Errorf("a device without systemd: %+v", odd)
+	}
+}

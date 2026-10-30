@@ -108,6 +108,7 @@ out = {
     "model": read("/proc/device-tree/model") or read("/sys/firmware/devicetree/base/model"),
     "compatible": read("/sys/firmware/devicetree/base/compatible").replace("\x00", " ").split(),
     "serial": read("/sys/devices/soc0/serial_number") or read("/sys/firmware/devicetree/base/serial-number"),
+    "bootId": read("/proc/sys/kernel/random/boot_id"),
     "ips": [],
     "appcli": False, "appcliVersion": "", "appList": None, "appListError": "",
     "pipIndex": "", "uvIndex": "", "mirrorManaged": False,
@@ -183,6 +184,17 @@ for line in read(os.path.join(home, ".ssh", "authorized_keys"), "\n ").splitline
 out["authorizedKeys"] = keys
 out["debianManaged"] = os.path.isdir("/var/lib/quay/apt-orig")
 out["relay"] = os.path.exists("/etc/apt/apt.conf.d/80quay-relay")
+try:  # the hook asks the port whether it is Quay's relay (Quay newer than 2026-10-28)
+    out["relayProbe"] = "quay-relay.invalid" in open("/usr/local/lib/quay/apt-proxy").read()
+except OSError:
+    out["relayProbe"] = False
+# First setup (App Lab's, or Quay's over USB): SSH on, and a usable password for the user
+# (passwd -S on one's own account: "arduino P …"; L locked, NP none).
+_, o, _ = sh("systemctl", "is-active", "ssh")
+_, o2, _ = sh("systemctl", "is-enabled", "ssh")
+rc, o3, _ = sh("passwd", "-S")
+out["setup"] = {"sshActive": o.strip() == "active", "sshEnabled": o2.strip() == "enabled",
+                "password": o3.split()[1] if rc == 0 and len(o3.split()) > 1 else ""}
 
 def nm_values(*args):
     rc, o, _ = sh("nmcli", "-t", *args, timeout=10)
@@ -207,6 +219,17 @@ if nv:
         net["hotspot"] = cv.get("802-11-wireless.mode") == "ap"
         net["ssid"] = cv.get("802-11-wireless.ssid", "")
     net["ours"] = net["hotspot"] and net["connection"] == "quay-hotspot"
+    # Saved Wi-Fi profiles, for system profiles (e.g. another tool's hotspot that comes up at boot).
+    profs = []
+    rc, o, _ = sh("nmcli", "-t", "-f", "UUID,TYPE,AUTOCONNECT,ACTIVE,NAME", "connection", "show", timeout=10)
+    for line in (o if rc == 0 else "").splitlines():
+        parts = line.split(":", 4)
+        if len(parts) < 5 or parts[1] not in ("802-11-wireless", "wifi"):
+            continue
+        cv = nm_values("-f", "802-11-wireless.mode,802-11-wireless.ssid", "connection", "show", "uuid", parts[0])
+        profs.append({"uuid": parts[0], "id": parts[4].replace("\\:", ":").replace("\\\\", "\\"), "ssid": cv.get("802-11-wireless.ssid", ""),
+                      "mode": cv.get("802-11-wireless.mode", "") or "infrastructure", "autoconnect": parts[2] == "yes", "active": parts[3] == "yes"})
+    out["nmProfiles"] = profs
     if net["ours"]:
         try:
             with open("/run/quay-hotspot/state.json") as f:
@@ -261,6 +284,60 @@ find "$dest" -mindepth 1 -maxdepth 1 ! -name data ! -name 'data.before-restore-*
 cp -a "$stage/." "$dest/"
 printf '%s\n' "$META" > "$dest/.quay.json"
 echo "installed $(find "$dest" -type f -not -path "$dest/.cache/*" -not -path "$dest/data/*" | wc -l) files into $dest"
+`
+
+// Indexes updates the board's library and platform indexes when the sketch pins a version that is
+// neither installed nor listed in them, or prints QUAY_NOSKETCH. The OS image ships the indexes of
+// its build day, and App CLI refreshes them only while it updates the system (App Lab's update) or
+// adds a library to a sketch. On a board updated through plain apt (Quay's update without the
+// desktop packages), or never updated, it cannot download a newer pin, and the sketch compiles
+// against the core's stub headers instead ("Please install the Arduino_RouterBridge library").
+const Indexes = `
+yaml="$APPS/$FOLDER/sketch/sketch.yaml"
+[ -f "$yaml" ] || { echo QUAY_NOSKETCH; exit 0; }
+unlisted() {
+    python3 - "$yaml" <<'EOF'
+import glob, json, os, re, sys
+text = open(sys.argv[1]).read()
+data = os.path.expanduser("~/.arduino15/")
+
+def unlisted(pins, index, entries):
+    pins = [p for p in pins if not glob.glob(data + "internal/" + glob.escape("_".join(p).replace(" ", "_")) + "_*")]
+    if not pins:
+        return []
+    try:
+        with open(data + index) as f:
+            have = entries(json.load(f))
+    except (OSError, ValueError, KeyError):
+        have = set()
+    return [p for p in pins if p not in have]
+
+libs = unlisted(re.findall(r"^\s*-\s+([^:()\n]+?)\s+\(([^)\s]+)\)[ \t]*$", text, re.M), "library_index.json",
+                lambda d: {(l["name"], l["version"]) for l in d["libraries"]})
+# Platforms from their own index (platform_index_url) are App CLI's to fetch.
+cores = unlisted([m[:3] for m in re.findall(r"^\s*-\s+platform:\s*([^:\s]+):(\S+)\s+\(([^)\s]+)\)[ \t]*(?:\n[ \t]+(platform_index_url):)?", text, re.M) if not m[3]],
+                 "package_index.json", lambda d: {(p["name"], q["architecture"], q["version"]) for p in d["packages"] for q in p["platforms"]})
+if libs:
+    print("lib", ", ".join("%s %s" % p for p in libs))
+if cores:
+    print("core", ", ".join("%s:%s %s" % p for p in cores))
+EOF
+}
+stale=$(unlisted)
+[ -n "$stale" ] || { echo "the board's indexes list every library and platform the sketch pins"; exit 0; }
+while read -r kind what; do
+    echo "the board's $kind index does not list $what yet: updating it"
+    arduino-cli "$kind" update-index || fail "could not update the board's $kind index, which the sketch needs for $what"
+done <<< "$stale"
+stale=$(unlisted)
+[ -z "$stale" ] || fail "the sketch pins versions the Arduino indexes do not list: $(cut -d' ' -f2- <<< "$stale" | paste -sd, -)"
+`
+
+// RefreshIndexes updates the Arduino platform and library indexes, as App CLI does while it lists
+// the system's updates.
+const RefreshIndexes = `
+arduino-cli core update-index
+arduino-cli lib update-index
 `
 
 // BeforeStart runs the app's before_start hook and clears the sketch build cache when the files
@@ -501,7 +578,14 @@ cat > /usr/local/lib/quay/apt-proxy <<EOF
 #!/bin/bash
 # Installed by Quay ("quay relay off" removes it). While Quay is connected to this board it
 # forwards 127.0.0.1:$PORT to its computer, and apt downloads through there; otherwise directly.
-if (exec 3<>/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then echo "http://127.0.0.1:$PORT"; else echo DIRECT; fi
+# Only when Quay's relay answers the probe ($PROBE): a port held by anything else (a connection an
+# earlier Quay left behind, which sshd has not noticed yet) would fail every download.
+if (exec 3<>/dev/tcp/127.0.0.1/$PORT && printf 'GET http://$PROBE/ HTTP/1.0\r\n\r\n' >&3 &&
+    IFS= read -r -t 3 line <&3 && [[ \$line == "HTTP/1."?" 200"* ]]) 2>/dev/null; then
+    echo "http://127.0.0.1:$PORT"
+else
+    echo DIRECT
+fi
 EOF
 chmod 755 /usr/local/lib/quay/apt-proxy
 cat > /etc/apt/apt.conf.d/80quay-relay <<'EOF'
@@ -526,6 +610,34 @@ const SetName = `
 arduino-app-cli system set-name "$NAME"
 `
 
+// EnableSSH turns the SSH server on the way App Lab's first setup does, with the commands the image
+// lets its user run without a password (/etc/sudoers.d/20-arduino-ssh): host keys first when the
+// image has none, then ssh and avahi-daemon (NAME.local) enabled and started. It prints the host's
+// public keys, for Quay to trust (they arrive over the connection already in use, USB say).
+const EnableSSH = `
+ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 || sudo -n /usr/sbin/dpkg-reconfigure openssh-server >/dev/null
+systemctl is-enabled --quiet ssh || sudo -n /usr/bin/systemctl enable ssh
+systemctl is-active --quiet ssh || sudo -n /usr/bin/systemctl start ssh
+systemctl is-active --quiet ssh || { echo "the SSH server did not start" >&2; exit 1; }
+systemctl is-enabled --quiet avahi-daemon || sudo -n /usr/bin/systemctl enable avahi-daemon || true
+systemctl is-active --quiet avahi-daemon || sudo -n /usr/bin/systemctl start avahi-daemon || true
+cat /etc/ssh/ssh_host_*_key.pub
+`
+
+// WaitOnline waits up to $SECS seconds for the board's Wi-Fi to be connected with an address, and
+// prints the address.
+const WaitOnline = `
+end=$(( $(date +%s) + SECS ))
+while :; do
+  if [ "$(nmcli -g GENERAL.STATE device show wlan0 2>/dev/null | cut -d' ' -f1)" = 100 ]; then
+    ip=$(nmcli -g IP4.ADDRESS device show wlan0 2>/dev/null | cut -d' ' -f1 | cut -d/ -f1)
+    [ -n "$ip" ] && { echo "$ip"; exit 0; }
+  fi
+  [ "$(date +%s)" -ge "$end" ] && { echo "the board is not on Wi-Fi after $SECS s" >&2; exit 1; }
+  sleep 2
+done
+`
+
 // RestartAvahi re-announces the board under its current hostname, with the two commands the image
 // allows without a password.
 const RestartAvahi = `
@@ -534,15 +646,77 @@ sudo -n systemctl stop avahi-daemon
 sudo -n systemctl start avahi-daemon
 `
 
+// aptCache gives the scripts below their own copy of apt's package cache, in $A. apt-get clean,
+// which ends every update, deletes the board's, and apt run without root then rebuilds it in
+// memory for every command: 5–10 s each on the UNO Q. apt checks the copy against the package
+// lists and the installed packages, as it does its own.
+const aptCache = `C="$HOME/.cache/quay/apt"
+mkdir -p "$C"
+A="-o Debug::NoLocking=1 -o Dir::Cache::pkgcache=$C/pkgcache.bin -o Dir::Cache::srcpkgcache=$C/srcpkgcache.bin"
+apt-cache $A policy apt >/dev/null 2>&1 || true # builds the copy once, before the commands share it
+T=$(mktemp -d)
+trap 'rm -rf "$T"' EXIT
+`
+
 // UpgradeList prints the simulated system upgrade ("Inst" lines), the packages' download URIs with
 // sizes, and whether a reboot is pending. No root needed.
 const UpgradeList = `
 export LC_ALL=C
-apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null | grep '^Inst ' || true
+` + aptCache + `
+# Sources on a mirror list (Quay's "mirror cn": mirror+file:/etc/apt/quay/NAME.list) download from
+# the list's first mirror.
+for f in /etc/apt/quay/*.list; do
+    [ -e "$f" ] && echo "QUAY_MIRRORLIST $f $(sed -n '1s#^[a-z]*://\([^/[:space:]]*\).*#\1#p' "$f")"
+done
+# Each apt command takes seconds; those that do not need another's output run side by side.
+# --allow-downgrades: -qq implies -y, which refuses the downgrades Arduino's pins ask for.
+apt-get --print-uris -qq --allow-downgrades $A dist-upgrade >"$T/uris" 2>/dev/null &
+apt-get update --print-uris $A >"$T/lists" 2>/dev/null &
+inst=$(apt-get -s $A dist-upgrade 2>/dev/null | grep '^Inst ' || true)
+[ -n "$inst" ] && printf '%s\n' "$inst"
+# Each package's candidate, the version apt picks for it by priority alone: one that dist-upgrade
+# takes to another version (from backports, say) is only pulled in by a package that needs it.
+if [ -n "$inst" ] && command -v apt-cache >/dev/null; then
+    printf '%s\n' "$inst" | awk '{print $2}' | xargs apt-cache $A policy 2>/dev/null |
+        awk '/^[^ ]/ {p = $1; sub(/:$/, "", p)} /^  Candidate:/ {print "QUAY_CAND", p, $2}'
+fi
+wait
 echo QUAY_URIS
-apt-get --print-uris -qq -o Debug::NoLocking=1 dist-upgrade 2>/dev/null || true
+cat "$T/uris"
 echo QUAY_END
 if [ -e /var/run/reboot-required ]; then echo QUAY_REBOOT; fi
+# The package lists of the configured sources: how many there are, how many are missing (a source
+# just switched to a mirror has none until apt-get update), and the newest repository date among
+# them (each InRelease's Date:; apt keeps the server's times, not when it fetched them).
+# apt-get update --print-uris names each source's InRelease file, also for a source with no lists.
+targets=0 missing=0 newest=0
+for f in $(awk '$2 ~ /_InRelease$/ {print $2}' "$T/lists"); do
+    targets=$((targets + 1))
+    r=/var/lib/apt/lists/$f
+    if [ ! -e "$r" ]; then missing=$((missing + 1)); continue; fi
+    d=$(sed -n 's/^Date: //p' "$r" | head -1)
+    s=$(date -d "$d" +%s 2>/dev/null || echo 0)
+    if [ -n "$d" ] && [ "$s" -gt "$newest" ]; then newest=$s; fi
+done
+echo "QUAY_LISTS $targets $missing $newest"
+`
+
+// UpgradePlan works out, for each line "KEY NAME…" of PLANS, what installing those package
+// upgrades installs (` + "`apt-get install --only-upgrade`" + `, as an update runs it), all side by side,
+// and prints "QUAY_PLAN KEY EXIT-STATUS" with the simulation's "Inst" lines. No root needed.
+const UpgradePlan = `
+export LC_ALL=C
+` + aptCache + `
+while read -r key names; do
+    [ -n "$key" ] || continue
+    { apt-get -s $A install --only-upgrade --allow-downgrades $names >"$T/$key" 2>&1 && echo 0 >"$T/$key.rc" || echo $? >"$T/$key.rc"; } &
+done <<<"$PLANS"
+wait
+while read -r key names; do
+    [ -n "$key" ] || continue
+    echo "QUAY_PLAN $key $(cat "$T/$key.rc")"
+    grep '^Inst ' "$T/$key" || true
+done <<<"$PLANS"
 `
 
 // UpgradeJob runs CMD detached from the SSH session — a system upgrade must survive a dropped
@@ -554,13 +728,62 @@ mkdir -p "$D"
 if [ -f "$D/pid" ] && kill -0 "$(cat "$D/pid")" 2>/dev/null; then
     echo QUAY_ATTACH
 else
-    rm -f "$D/rc"
+    rm -f "$D/rc" "$D/pid"
     : > "$D/log"
-    setsid bash -c "$CMD"' >"$0/log" 2>&1; echo $? >"$0/rc"' "$D" </dev/null >/dev/null 2>&1 &
-    echo $! > "$D/pid"
+    printf '%s\n' "${ROUND:-}" > "$D/round" # which round of an update this is, for FollowUpgrade
+    touch "$D/started" # PrefsChanged looks for apt preferences newer than this
+    # The job is a file of its own: systemd would expand the $ of a command line. CMD may be a list
+    # (a && b && c): the group sends all of its output to the log, not the last command's only.
+    printf '%s\n' "$CMD" > "$D/cmd"
+    cat > "$D/job.sh" <<'JOB'
+D=$(dirname "$0")
+echo $$ > "$D/pid"
+{ eval "$(cat "$D/cmd")"; } > "$D/log" 2>&1
+echo $? > "$D/rc"
+JOB
+    # Under the user's systemd when it runs, so the job belongs to neither connection: adbd, which a
+    # USB connection runs under, takes everything it started down with it when it restarts (it does,
+    # in the middle of an update). Otherwise in a session of its own.
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    if ! { [ -S "$XDG_RUNTIME_DIR/bus" ] && command -v systemd-run >/dev/null &&
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus" systemd-run --user --quiet --collect \
+            --unit="quay-upgrade-$$" bash "$D/job.sh" </dev/null >/dev/null 2>&1; }; then
+        setsid bash "$D/job.sh" </dev/null >/dev/null 2>&1 &
+    fi
+    for _ in $(seq 50); do [ -s "$D/pid" ] && break; sleep 0.1; done
+    [ -s "$D/pid" ] || fail "the update job did not start"
 fi
 tail -n +1 -f --pid="$(cat "$D/pid")" "$D/log"
 rc=$(cat "$D/rc" 2>/dev/null || echo 1)
+exit "$rc"
+`
+
+// MarkUpgrade marks the start of an install that does not run as an UpgradeJob (an image that wants
+// a password for apt), for PrefsChanged.
+const MarkUpgrade = `mkdir -p /tmp/quay-upgrade && touch /tmp/quay-upgrade/started`
+
+// PrefsChanged lists the apt preference files changed since the last install started, each with the
+// package that owns it: "path package". A file's ctime is when it was written; dpkg keeps the
+// packaged mtime. find exits 1 for a path that does not exist (the UNO Q has no
+// /etc/apt/preferences), which pipefail would turn into a failed script that hides every change.
+const PrefsChanged = `
+D=/tmp/quay-upgrade
+[ -f "$D/started" ] || exit 0
+{ find /etc/apt/preferences /etc/apt/preferences.d -maxdepth 1 -type f -cnewer "$D/started" 2>/dev/null || true; } | sort | while read -r f; do
+    echo "$f $(dpkg -S "$f" 2>/dev/null | head -1 | cut -d: -f1)"
+done
+`
+
+// UpgradeFollow picks up UpgradeJob's job after the connection dropped (the update restarts the
+// board's services, sshd among them): it follows the rest of the job if it still runs, and exits
+// with its exit status, showing the end of its output when it failed.
+const UpgradeFollow = `
+D=/tmp/quay-upgrade
+if [ -f "$D/pid" ] && kill -0 "$(cat "$D/pid")" 2>/dev/null; then
+    tail -n 0 -f --pid="$(cat "$D/pid")" "$D/log"
+fi
+rc=$(cat "$D/rc" 2>/dev/null || echo 1)
+[ "$rc" = 0 ] || tail -n 5 "$D/log"
 exit "$rc"
 `
 

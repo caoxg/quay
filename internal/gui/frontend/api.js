@@ -64,6 +64,8 @@ const mockState = {
     },
   ],
 };
+// ?empty: no boards yet (the welcome page).
+if (new URLSearchParams(location.search).has('empty')) mockState.boards = [];
 const duckProfile = {
   id: 'xgoduck', name: 'XGO-Duck', description: 'Duck-shaped biped robot (Microduck lineage) — walking, get-up and pick policies at 50 Hz.', folder: 'xgoduck_runtime_arduino',
   icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"> <g stroke="#2b2f33" stroke-width="1.6" stroke-linejoin="round"> <path d="M21 44h8l-1 7h-6z" fill="#d5d8dc"/> <rect x="22.5" y="50" width="4.5" height="7" fill="#2b2f33"/> <rect x="18" y="56.5" width="12" height="4" rx="1.5" fill="#d9ab00"/> <rect x="14.5" y="33" width="4" height="13" rx="1" fill="#2f6f8f"/> <rect x="18" y="33.5" width="22" height="12" rx="3.5" fill="#fff"/> <path d="M30 44h8.5l-1 7h-6.5z" fill="#fff"/> <rect x="32" y="50" width="4.5" height="7" fill="#2b2f33"/> <rect x="30" y="56.5" width="13.5" height="4" rx="1.5" fill="#f6c700"/> <path d="M28 27h5.5l2.5 8h-5.5z" fill="#2b2f33"/> <path d="M9.5 24.5h50.5a1.8 1.8 0 0 1 0 4H9.5a1.8 1.8 0 0 1 0-4z" fill="#f6c700"/> <path d="M12 25.5C8.5 25.5 7.5 22 8.5 18.5C10 13.5 15 11.5 22 10.5L45 7.5C53 6.6 57.5 10.5 57.5 17V25.5Z" fill="#fff"/> <circle cx="48.5" cy="16" r="4" fill="#2b2f33"/> </g> <circle cx="49.4" cy="15.1" r="1.4" fill="#fff"/> </svg>',
@@ -132,8 +134,19 @@ function mockPrompt(p) {
   return new Promise((resolve) => { const id = nid(); prompts.set(id, resolve); localEmit('quay:prompt', { id, ...p }); });
 }
 
+// ?fresh: the USB board is a freshly flashed one, before any first setup.
+const FRESH = new URLSearchParams(location.search).has('fresh');
+function freshBoard() {
+  const done = mockState.freshDone;
+  return { board: 'desk', target: 'usb', user: 'arduino', home: '/home/arduino', hostname: done || 'arduino', model: 'Arduino UNO Q', serial: '91f0c2d4', isUnoQ: true,
+    ips: done ? [{ iface: 'wlan0', ip: '192.168.1.77' }] : [], appcli: true, appcliVersion: 'Arduino App CLI version 0.14.0',
+    os: { id: 'debian', name: 'Debian GNU/Linux', pretty: 'Debian GNU/Linux 13 (trixie)', version: '13.1', codename: 'trixie' },
+    mirror: { debian: 'http://deb.debian.org/debian', debianFallback: [], managed: false }, authorizedKeys: [], relay: {}, apps: [], folders: [],
+    setup: done ? { sshActive: true, sshEnabled: true, password: 'P' } : { sshActive: false, sshEnabled: false, password: 'L' } };
+}
 function statusData(board) {
-  if (board === 'desk') throw new Error('no UNO Q found over USB (use a data cable)');
+  if (board === 'desk' && !FRESH) throw new Error('no UNO Q found over USB (use a data cable)');
+  if (board === 'desk') return freshBoard();
   return {
     board, target: `arduino@${mockState.hostname}.local`, user: 'arduino', home: '/home/arduino', hostname: mockState.hostname, model: 'Arduino UNO Q', serial: '2c3e91a7', isUnoQ: true,
     ips: [{ iface: 'wlan0', ip: '192.168.1.42' }], appcli: true, appcliVersion: `Arduino App CLI version ${mockState.appcli}`,
@@ -147,12 +160,24 @@ function statusData(board) {
   };
 }
 
+// ?netdemo: a phone hotspot saved, and the away plan "both" with the board's hotspot "duck".
+if (new URLSearchParams(location.search).has('netdemo')) {
+  mockState.wifi.push({ uuid: 'u-phone', id: 'Wei’s iPhone', ssid: 'Wei’s iPhone', mode: 'infrastructure', hidden: false, autoconnect: true, priority: -10, secure: true, phone: true });
+  mockState.away = 'both';
+  mockState.hotspot = { ssid: 'duck' };
+}
 // ?duckos: the board runs Duck OS, with Duck Setup's hotspot still set to come up at boot.
 const DUCKOS = new URLSearchParams(location.search).has('duckos');
+function updateState() {
+  const on = new URLSearchParams(location.search).has('update');
+  return { current: 'v0.1.1', dev: false, checked: Date.now(), available: on, kind: 'mac-app', path: '/Applications/Quay.app', size: on ? 31457280 : 0,
+    latest: on ? { version: 'v0.2.0', url: 'https://github.com/caoxg/quay/releases/tag/v0.2.0', notes: '## Highlights\n\n- **Wi‑Fi and the away plan.** The board opens a hotspot of its own away from home, or joins your phone.\n- **System profiles.** Duck OS is recognised.\n- **Quay updates itself**, signed and checked.\n\n---\n\n### macOS: opening Quay the first time\n…' } : { version: 'v0.1.1' } };
+}
 function netSummary() {
   const h = mockState.hotspot, w = mockState.wifi.find((x) => x.uuid === mockState.wifiActive);
   if (mockState.onHotspot && h) return { state: 100, connection: 'quay-hotspot', ssid: h.ssid, hotspot: true, ours: true, away: mockState.away, stations: 1 };
-  return { state: w ? 100 : 30, connection: w?.id || '', ssid: w?.ssid || '', hotspot: false, ours: false, away: mockState.away };
+  return { state: w ? 100 : 30, connection: w?.id || '', ssid: w?.ssid || '', hotspot: false, ours: false, away: mockState.away,
+    ...(DUCKOS ? { systemHotspot: { system: 'Duck OS', ssid: 'XGO-Duck', autoconnect: !mockState.duckSetupHotspotOff, active: false } } : {}) };
 }
 function networkData() {
   const h = mockState.hotspot, own = mockState.away === 'board' || mockState.away === 'both';
@@ -184,6 +209,8 @@ function systemData() {
     p('chromium-common', '143.0.7499.40-1~deb13u1', '155.0.8059.79-1~deb13u1', 36280000, 'deb.debian.org', { desktop: true }),
     p('arduino-router', '0.10.0', '0.11.0', 2091564, 'apt-repo.arduino.cc'),
     p('libasound2t64', '1.2.14-1', '1.2.16.1-1~bpo13+1', 410000, 'apt-repo.arduino.cc'),
+    p('alsa-ucm-conf', '1.2.16.1-1~bpo13+1', '1.2.14-1qcom0.1arduino3', 38000, 'apt-repo.arduino.cc', { downgrade: true }),
+    ...(new URLSearchParams(location.search).has('downgrades') ? Array.from({ length: 24 }, (_, i) => p(`libqcom-audio-${i}`, '2.0.1-1~bpo13+1', '1.9.0-1qcom0.1arduino1', 12000, 'apt-repo.arduino.cc', { downgrade: true })) : []),
     p('libasound2-data', '1.2.14-1', '1.2.16.1-1~bpo13+1', 42000, 'apt-repo.arduino.cc'),
     p('bash', '5.2.37-2+b5', '5.2.37-2+b10', 1456340, 'deb.debian.org'),
   ];
@@ -194,8 +221,15 @@ function systemData() {
   if (mockState.upgraded === 'arduino') pkgs = pkgs.filter((x) => !x.arduino);
   const sum = (l) => ({ count: l.length, size: l.reduce((a, x) => a + x.size, 0) });
   const hosts = [...new Set(pkgs.map((x) => x.source))];
+  // apt's plans: the libgtk ones come in only for the desktop.
+  const deskOnly = (x) => x.desktop || x.name.startsWith('libgtk');
+  const plan = (l) => ({ ...sum(l), packages: l.map((x) => x.name) });
+  const plans = {
+    all: plan(pkgs), skip: plan(pkgs.filter((x) => !deskOnly(x))),
+    arduino: plan(pkgs.filter((x) => x.arduino || x.name.startsWith('libqt'))), 'arduino+skip': plan(pkgs.filter((x) => x.arduino && !x.desktop)),
+  };
   return {
-    packages: pkgs, total: sum(pkgs), arduino: sum(pkgs.filter((x) => x.arduino)), desktop: sum(pkgs.filter((x) => x.desktop)),
+    packages: pkgs, total: sum(pkgs), plans, arduino: sum(pkgs.filter((x) => x.arduino)), desktop: sum(pkgs.filter((x) => x.desktop)),
     sources: hosts.map((h) => ({ host: h, ...sum(pkgs.filter((x) => x.source === h)) })).sort((a, b) => b.size - a.size),
     rebootRequired: false, running: mockState.apps.filter((a) => a.status === 'running').map((a) => a.name),
     appcliVersion: `Arduino App CLI version ${mockState.appcli}`, checkedAt: Date.now(),
@@ -227,10 +261,11 @@ const mock = {
     mockState.boards = mockState.boards.filter((b) => b.name !== oldName && b.name !== t.name).concat([t]);
     if (makeDefault) mockState.def = t.name;
   },
+  SetSkipDesktop: (n, on) => { const b = mockState.boards.find((x) => x.name === n); if (b) b.skipDesktop = on; },
   RemoveBoard: (n) => { mockState.boards = mockState.boards.filter((b) => b.name !== n); },
   SetDefault: (n) => { mockState.def = n; },
   SetLang: (l) => { mockState.lang = l; },
-  USBDevices: async () => { await sleep(300); return [{ serial: '2a1f9c03', state: 'device' }]; },
+  USBDevices: async () => { await sleep(300); return [{ serial: '2a1f9c03', state: 'device', hostname: FRESH ? 'arduino' : 'rig', model: 'Arduino UNO Q', setup: FRESH && !mockState.freshDone ? { sshActive: false, password: 'L' } : { sshActive: true, password: 'P' } }]; },
   Respond: (id, value, ok) => { const r = prompts.get(id); prompts.delete(id); r?.(ok); },
   Cancel: () => {},
   Disconnect: () => {},
@@ -259,6 +294,7 @@ const mock = {
     ['backup', 'Back up data/', ['saved ~/Library/Application Support/Quay/backups/xgoduck_runtime_arduino-9f3a21c7-20261023-101833.tgz']],
     ['stop', 'Stop XGO Duck', ['App stopped']], ['upload', 'Upload 33 files (6.1 MB)', [], 900],
     ['install', 'Install into ~/ArduinoApps/xgoduck_runtime_arduino (data/ kept)', ['installed 33 files into /home/arduino/ArduinoApps/xgoduck_runtime_arduino']],
+    ['indexes', 'Check the board\'s library index has the sketch\'s pinned versions', ['the board\'s indexes list every library and platform the sketch pins']],
     ['before_start', 'Run the app\'s preparation hook', ['RouterBridge 0.4.3 RPC stack already 4096 bytes', 'RPClite 0.3.1 bounded framing installed / updated']],
     ['start', 'Start the app', ['Starting app XGO Duck…', 'Building sketch (cached)', 'App started'], 1300],
   ], { folder: req.folder, commit: '466512e9426f61fb07d9be9b3f20df0171692150', previous: '9dc36787bc61b102c2da0f97c9c758e639e90ab8', needsSetup: true }, {
@@ -304,14 +340,42 @@ const mock = {
   },
   WifiPhone: (b, uuid, phone) => simulate('wifi', b, '', [['wifi', 'Mark a saved Wi-Fi', [phone ? 'marked as a phone hotspot' : 'marked as an ordinary Wi-Fi'], 500]], null,
     { after: () => { const p = mockState.wifi.find((x) => x.uuid === uuid); if (p) p.phone = phone; } }),
+  FirstSetup: (b, name, pw, ssid) => simulate('firstsetup', b, '', [['password', "Set the board's password", [], 500], ['verify', 'Check that sudo takes the new password', [], 300],
+    ['ssh', 'Turn the SSH server on', [], 600], ['rename', 'Rename the board to ' + name, [], 500], ['key', 'Upload the SSH public key', [], 300],
+    ...(ssid ? [['wifi', 'Save Wi-Fi ' + ssid, [`saved Wi-Fi "${ssid}"`], 600], ['online', 'Wait for the board to join Wi-Fi (up to 60 s)', [], 1200], ['sshswitch', 'Connect over SSH to ' + name + '.local', [], 800]] : [])],
+    () => ({ board: b, host: name + '.local', ip: ssid ? '192.168.1.77' : '', ssh: !!ssid, note: ssid ? '' : 'the board is not on Wi-Fi after 60 s' }), { after: () => { mockState.freshDone = name; } }),
+  SetPassword: (b) => simulate('passwd', b, '', [['password', "Set the board's password", [], 600], ['verify', 'Check that sudo takes the new password', [], 300]]),
+  WifiConnect: (b, uuid) => simulate('wifi', b, '', [['wifi', 'Join a saved Wi-Fi now', [`the board joins "${mockState.wifi.find((x) => x.uuid === uuid)?.ssid}" in a few seconds`], 600]], null,
+    { after: () => { mockState.wifiActive = uuid; mockState.onHotspot = false; } }),
   WifiRemove: (b, uuid) => simulate('wifi', b, '', [['wifi', 'Remove a saved Wi-Fi', ['removed'], 600]], null, { after: () => { mockState.wifi = mockState.wifi.filter((p) => p.uuid !== uuid); } }),
   Away: (b, mode, ssid) => simulate('away', b, '', [...(ssid ? [['hotspot', `Save hotspot "${ssid}"`, [`hotspot "${ssid}" saved`], 500]] : []),
     ['away', { off: 'Away from saved Wi-Fi: stay offline', board: "Away from saved Wi-Fi: open the board's own hotspot", phone: 'Away from saved Wi-Fi: join a phone hotspot', both: "Away from saved Wi-Fi: join a phone hotspot, else open the board's own" }[mode], [], 800]],
     null, { after: () => { if (ssid) mockState.hotspot = { ssid }; mockState.away = mode; if (mode === 'off' || mode === 'phone') mockState.onHotspot = false; } }),
   HotspotNow: (b, open) => simulate('hotspot', b, '', [['hotspot', open ? 'Open the hotspot now' : 'Close the hotspot and join a saved Wi-Fi', [`asked quay-hotspot to ${open ? 'open' : 'close'} the hotspot`], 600]], null,
     { after: () => { mockState.onHotspot = open; } }),
+  SetMenuLang: () => {},
+  Settings: () => ({ profilesAuto: !mockState.profilesManual, profilesUpdated: '2026-10-25', profilesSource: 'https://raw.githubusercontent.com/caoxg/quay-profiles/main/index.yaml', logDir: '~/Library/Logs/Quay' }),
+  RevealLog: () => {},
+  SetProfilesAuto: (on) => { mockState.profilesManual = !on; return mock.Settings(); },
+  RefreshProfiles: () => simulate('profiles', '', '', [], () => mock.Settings()),
+  // ?update: a newer release is out
+  UpdateState: () => updateState(),
+  CheckUpdate: () => simulate('updatecheck', '', '', [], () => updateState()),
+  InstallUpdate: () => {
+    const op = nid(), base = { kind: 'selfupdate' }, total = 31457280;
+    setTimeout(async () => {
+      emitOp(op, { ...base, type: 'begin' });
+      emitOp(op, { ...base, type: 'step', step: 'selfupdate', state: 'run', text: 'Download, verify and install Quay v0.2.0' });
+      for (let i = 1; i <= 30; i++) { await sleep(80); emitOp(op, { ...base, type: 'progress', step: 'selfupdate', data: { percent: (100 * i) / 30, done: (total * i) / 30, total, unit: 'bytes' } }); }
+      emitOp(op, { ...base, type: 'step', step: 'selfupdate', state: 'ok', text: 'Download, verify and install Quay v0.2.0' });
+      emitOp(op, { ...base, type: 'end', state: 'ok', result: { version: 'v0.2.0', relaunch: true, target: { kind: 'mac-app', path: '/Applications/Quay.app' } } });
+    }, 10);
+    return op;
+  },
+  Relaunch: () => { setTimeout(() => location.reload(), 1500); },
   SystemFix: (b, id) => simulate('sysfix', b, '', [['system', "Don't open it at boot", ['Duck-Setup-hotspot-1a2b3c4d: no longer comes up by itself'], 700]], null,
     { after: () => { mockState.duckSetupHotspotOff = true; } }),
+  CheckRelayUpstream: (s) => (/^(https?:\/\/)?[\w.-]+:\d+$/.test((s || '').trim()) || !(s || '').trim() ? {} : { problem: 'port', detail: (s || '').trim() }),
   RelaySettings: () => ({ upstream: mockState.relayUpstream, effective: mockState.relayUpstream || 'http://127.0.0.1:7890' }),
   SetRelayUpstream: (u) => { mockState.relayUpstream = u; return mock.RelaySettings(); },
   Scan: () => simulate('scan', '', '', [['scan', 'Look for boards', [], 1100]], () => [
@@ -319,7 +383,7 @@ const mock = {
     { name: mockState.hostname, host: mockState.hostname + '.local', ips: ['192.168.1.42'], board: 'unoq', model: 'Arduino UNO Q', serial: '2c3e91a7', version: '0.1', saved: mockState.boards.find((x) => x.boardId === '2c3e91a7')?.name || '' },
   ]),
   AddBoard: (t, makeDefault, uploadKey) => simulate('addboard', '', '', [['connect', 'Connect to ' + (t.host || 'USB'), [], 900]], () => {
-    const name = t.kind === 'adb' ? 'rig' : (t.host.split('.')[0] || 'board').toLowerCase();
+    const name = t.kind === 'adb' ? (FRESH ? 'desk' : 'rig') : (t.host.split('.')[0] || 'board').toLowerCase();
     mockState.boards = mockState.boards.filter((x) => x.name !== name).concat([{ ...t, name, boardId: name === mockState.hostname ? '2c3e91a7' : 'x' + name }]);
     if (makeDefault || !mockState.def) mockState.def = name;
     if (uploadKey) mockState.keyUploaded = true;
@@ -332,6 +396,7 @@ const mock = {
     mockState.hostname = n;
     return statusData(n);
   }),
+  SystemCheckAuto: (b) => mock.SystemCheck(b, false),
   SystemCheck: (b, refresh) => simulate('syscheck', b, '', refresh
     ? [['refresh', 'Refresh the package lists', ['Hit:1 http://deb.debian.org/debian trixie InRelease', 'Get:2 https://apt-repo.arduino.cc stable InRelease [3,141 B]', 'Fetched 3,141 B in 2s (1,520 B/s)'], 1400], ['list', 'List the available updates', [], 500]]
     : [['list', 'List the available updates', [], 700]], () => systemData()),
@@ -350,15 +415,28 @@ const mock = {
       emitOp(op, { ...base, type: 'begin' });
       if (!opt.downloadOnly && mockState.apps.some((a) => a.status === 'running')) { step('safety', 'run', 'Check it is safe to interrupt the running apps'); await sleep(300); step('safety', 'ok', 'Check it is safe to interrupt the running apps'); }
       step('refresh', 'run', 'Refresh the package lists'); await sleep(600); step('refresh', 'ok', 'Refresh the package lists');
+      if (opt.skipDesktop && !opt.downloadOnly) { step('refresh_indexes', 'run', 'Refresh the Arduino platform and library indexes'); await sleep(500); step('refresh_indexes', 'ok', 'Refresh the Arduino platform and library indexes'); }
       if (!mockState.downloaded) {
         step('download', 'run', 'Download the updates (824 MB)'); await prog('download', 863905000, 'bytes', 6000); step('download', 'ok', 'Download the updates (824 MB)');
         mockState.downloaded = true;
       }
       if (opt.downloadOnly) { emitOp(op, { ...base, type: 'end', state: 'ok', result: { remaining: 361, downloaded: true } }); return; }
-      step('upgrade', 'run', 'Install the updates'); await prog('upgrade', 361, 'packages', 6000); step('upgrade', 'ok', 'Install the updates');
+      if (opt.arduinoOnly) { step('upgrade', 'run', 'Install the updates'); await prog('upgrade', 9, 'packages', 2500); step('upgrade', 'ok', 'Install the updates'); }
+      else { // two rounds, as core.Upgrade: App Lab's packages, then the rest under the apt rules they bring
+        step('upgrade_arduino', 'run', "Install App Lab's packages (arduino-*)"); await prog('upgrade_arduino', 9, 'packages', 2500); step('upgrade_arduino', 'ok', "Install App Lab's packages (arduino-*)");
+        step('upgrade', 'run', 'Install the other updates'); await prog('upgrade', 352, 'packages', 5000); step('upgrade', 'ok', 'Install the other updates');
+      }
+      if (opt.skipDesktop) { // through Quay's apt commands: then what App Lab's update adds
+        const t = "Download what App Lab's update adds: the Arduino platform, the examples' libraries, the app images";
+        step('applab', 'run', t); await prog('applab', 1730000000, 'bytes', 4000); step('applab', 'ok', t);
+      }
       step('result', 'run', 'Check the result'); await sleep(300); step('result', 'ok', 'Check the result');
       mockState.upgraded = opt.arduinoOnly ? 'arduino' : opt.skipDesktop ? 'partial' : 'all'; mockState.appcli = '0.14.0';
-      emitOp(op, { ...base, type: 'end', state: 'ok', result: { remaining: opt.skipDesktop ? 3 : 0, rebootRequired: false, appcliVersion: 'Arduino App CLI version 0.14.0' } });
+      // The first update brings Arduino's apt pins (arduino-unoq-config 0.2), which ask for a second round.
+      const rules = mockState.pinsDone ? undefined : { files: [{ path: '/etc/apt/preferences.d/arduino-pins.pref', package: 'arduino-unoq-config' }],
+        packages: [{ name: 'alsa-ucm-conf', from: '1.2.16.1-1~bpo13+1', to: '1.2.14-1qcom0.1arduino3', arduinoRepo: true, downgrade: true, size: 0 }] };
+      mockState.pinsDone = true;
+      emitOp(op, { ...base, type: 'end', state: 'ok', result: { remaining: (opt.skipDesktop ? 3 : 0) + (rules ? 1 : 0), rebootRequired: false, appcliVersion: 'Arduino App CLI version 0.14.0', rules } });
     }, 10);
     return op;
   },

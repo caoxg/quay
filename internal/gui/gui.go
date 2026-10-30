@@ -7,8 +7,12 @@ package gui
 import (
 	"embed"
 	"io/fs"
+	"runtime"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+
+	"github.com/caoxg/quay/internal/applog"
+	"github.com/caoxg/quay/internal/version"
 )
 
 //go:embed frontend
@@ -25,6 +29,7 @@ func Run() error {
 	if err != nil {
 		return err
 	}
+	applog.Default.Printf("Quay %s started (%s/%s)", version.Version, runtime.GOOS, runtime.GOARCH)
 	svc := newService()
 	app := application.New(application.Options{
 		Name:        "Quay",
@@ -40,6 +45,7 @@ func Run() error {
 		},
 	})
 	svc.app = app
+	svc.SetMenuLang("en") // the page sets its language as soon as it loads
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:            "Quay",
 		Width:            1220,

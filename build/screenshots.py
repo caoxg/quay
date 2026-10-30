@@ -37,8 +37,8 @@ def serve() -> http.server.ThreadingHTTPServer:
     return srv
 
 
-def start(page: Page, lang: str) -> None:
-    page.goto(f"http://127.0.0.1:{PORT}/index.html?mock&noanim&shot")
+def start(page: Page, lang: str, extra: str = "") -> None:
+    page.goto(f"http://127.0.0.1:{PORT}/index.html?mock&noanim&shot{extra}")
     # The mock asks for the board's SSH password once, like a first connection.
     page.wait_for_selector(".modal [data-bind=value]")
     page.fill(".modal [data-bind=value]", "mock")
@@ -86,6 +86,19 @@ def scenes(page: Page, lang: str) -> None:
     page.wait_for_selector(".hooks-box")
     page.wait_for_timeout(300)
     shot(page, "custom-install", lang)
+
+    # The app card of an app that follows GitHub: three new commits, a red dot on Update.
+    start(page, lang)
+    card = page.locator(".app-card").first
+    card.screenshot(path=str(OUT / f"app-update-{lang}.png"))
+    print("wrote", (OUT / f"app-update-{lang}.png").relative_to(ROOT))
+
+    # Away from home: everyday Wi-Fi, a phone hotspot and the away plan "both".
+    start(page, lang, "&netdemo")
+    page.click(".stat[data-act=network]")
+    page.wait_for_selector(".hs-box")
+    page.wait_for_timeout(300)
+    shot(page, "network", lang)
 
     start(page, lang)
     page.click(".app-card [data-act=policies]")

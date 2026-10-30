@@ -19,6 +19,9 @@ import (
 // The results come back best first.
 func (s *Session) TestMirrors(ctx context.Context, sink Sink, list []mirror.Mirror) ([]mirror.Result, error) {
 	o := s.op(ctx, sink)
+	if err := o.clock(); err != nil {
+		return nil, err
+	}
 	payload, err := json.Marshal(map[string]any{"mirrors": list, "seconds": 2.5})
 	if err != nil {
 		return nil, err

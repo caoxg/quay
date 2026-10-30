@@ -27,8 +27,13 @@ func (s *Session) StartRelay(p *relay.Proxy) error {
 		if err != nil {
 			return fmt.Errorf("cannot open port %d on the board (another Quay may be relaying already): %w", relay.Port, err)
 		}
-		go func() { _ = p.Serve(ln) }()
+		s.relayGen++
+		gen := s.relayGen
 		s.relayStop = func() { _ = ln.Close() }
+		go func() { // SSH channels have no deadlines
+			_ = p.ServeBridged(ln)
+			s.relayEnded(gen) // the forward went (with the connection): not relaying any more
+		}()
 	case *board.ADB:
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -51,6 +56,15 @@ func (s *Session) StartRelay(p *relay.Proxy) error {
 		return errors.New("the relay needs an SSH or USB connection")
 	}
 	return nil
+}
+
+// relayEnded forgets relay number gen of StartRelay, if it is still the current one.
+func (s *Session) relayEnded(gen int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.relayGen == gen {
+		s.relayStop = nil
+	}
 }
 
 // StopRelay stops StartRelay's forwarding.

@@ -25,6 +25,7 @@ type Status struct {
 	Hostname      string      `json:"hostname"`
 	Model         string      `json:"model"`
 	Serial        string      `json:"serial"`
+	BootID        string      `json:"bootId,omitempty"` // changes with every boot (a re-flash among them)
 	IsUnoQ        bool        `json:"isUnoQ"`
 	IPs           []IfaceIP   `json:"ips"`
 	AppCLI        bool        `json:"appcli"`
@@ -40,10 +41,12 @@ type Status struct {
 	Findings []sysprofile.Finding `json:"findings,omitempty"`
 	// AuthorizedKeys are the base64 parts of the login user's ~/.ssh/authorized_keys, to tell
 	// whether this computer's public key is on the board.
-	AuthorizedKeys []string    `json:"authorizedKeys"`
-	Apps           []App       `json:"apps"`
-	Broken         []BrokenApp `json:"broken,omitempty"`
-	CheckedAt      int64       `json:"checkedAt"`
+	AuthorizedKeys []string `json:"authorizedKeys"`
+	// Setup tells whether the board had its first setup: SSH on and a usable password.
+	Setup     *Setup      `json:"setup,omitempty"`
+	Apps      []App       `json:"apps"`
+	Broken    []BrokenApp `json:"broken,omitempty"`
+	CheckedAt int64       `json:"checkedAt"`
 }
 
 // OSInfo is the board's operating system (/etc/os-release, /etc/debian_version).
@@ -74,6 +77,9 @@ type Mirror struct {
 type Relay struct {
 	Installed bool `json:"installed"` // the board's apt hook is in place (quay relay on)
 	Active    bool `json:"active"`    // this session is relaying right now
+	// Outdated: the hook predates the probe, so a port held by a connection Quay left behind fails
+	// apt's downloads. Turning the relay on again replaces it.
+	Outdated bool `json:"outdated,omitempty"`
 }
 
 // App is one user app on the board.
@@ -122,6 +128,7 @@ type rawStatus struct {
 	Model      string   `json:"model"`
 	Compatible []string `json:"compatible"`
 	Serial     string   `json:"serial"`
+	BootID     string   `json:"bootId"`
 	IPs        []struct {
 		Ifname string `json:"ifname"`
 		IP     string `json:"ip"`
@@ -154,10 +161,20 @@ type rawStatus struct {
 	DebianFallback []string                       `json:"debianFallback"`
 	DebianManaged  bool                           `json:"debianManaged"`
 	AuthorizedKeys []string                       `json:"authorizedKeys"`
+	Setup          *Setup                         `json:"setup"`
 	RelayHook      bool                           `json:"relay"`
+	RelayProbe     bool                           `json:"relayProbe"`
 	Net            *NetSummary                    `json:"net"`
 	SysFiles       map[string]sysprofile.FileFact `json:"sysFiles"`
-	Folders        []struct {
+	NMProfiles     []struct {
+		UUID        string `json:"uuid"`
+		ID          string `json:"id"`
+		SSID        string `json:"ssid"`
+		Mode        string `json:"mode"`
+		Autoconnect bool   `json:"autoconnect"`
+		Active      bool   `json:"active"`
+	} `json:"nmProfiles"`
+	Folders []struct {
 		Folder   string                     `json:"folder"`
 		Path     string                     `json:"path"`
 		Quay     *Deployment                `json:"quay"`
@@ -174,7 +191,9 @@ func (s *Session) Status(ctx context.Context) (*Status, error) {
 	set := sysprofile.Current(ctx)
 	exists, keys := sysprofile.Checks(set.Profiles)
 	if err := s.T.Exec(ctx, "python3 -", strings.NewReader(remote.WithChecks(remote.Status, exists, keys)), &out, &errb); err != nil {
-		if strings.Contains(errb.String(), "not found") {
+		// "python3: not found" from the board's shell; adb's own "device '…' not found" means the board
+		// left USB, not that it lacks python3.
+		if e := errb.String(); strings.Contains(e, "python3") && strings.Contains(e, "not found") {
 			return nil, fmt.Errorf("python3 is missing on the board — is this an Arduino UNO Q?")
 		}
 		return nil, fmt.Errorf("status: %v %s", err, strings.TrimSpace(errb.String()))
@@ -185,17 +204,27 @@ func (s *Session) Status(ctx context.Context) (*Status, error) {
 	}
 	st := &Status{
 		Target: s.T.Describe(), User: raw.User, Home: raw.Home, Hostname: raw.Hostname, Model: raw.Model,
-		Serial: raw.Serial, AppCLI: raw.AppCLI, AppCLIVersion: raw.AppCLIVersion, AppListError: raw.AppListError, OS: raw.OS,
+		Serial: raw.Serial, BootID: raw.BootID, AppCLI: raw.AppCLI, AppCLIVersion: raw.AppCLIVersion, AppListError: raw.AppListError, OS: raw.OS,
 		Mirror:         Mirror{Pip: raw.PipIndex, PipFallback: raw.PipExtra, UV: raw.UVIndex, Debian: raw.DebianMirror, DebianFallback: raw.DebianFallback, Managed: raw.MirrorManaged || raw.DebianManaged},
 		AuthorizedKeys: append([]string{}, raw.AuthorizedKeys...),
-		Relay:          Relay{Installed: raw.RelayHook, Active: s.RelayActive()},
+		Setup:          raw.Setup,
+		Relay:          Relay{Installed: raw.RelayHook, Active: s.RelayActive(), Outdated: raw.RelayHook && !raw.RelayProbe},
 		Net:            raw.Net,
 		CheckedAt:      time.Now().UnixMilli(),
 	}
 	facts := sysprofile.Facts{Files: raw.SysFiles}
+	if raw.Net != nil {
+		facts.Profiles = []sysprofile.NMProfile{}
+		for _, p := range raw.NMProfiles {
+			facts.Profiles = append(facts.Profiles, sysprofile.NMProfile{UUID: p.UUID, ID: p.ID, SSID: p.SSID, Mode: p.Mode, Autoconnect: p.Autoconnect, Active: p.Active})
+		}
+	}
 	if p := sysprofile.Identify(set.Profiles, facts); p != nil {
 		st.System = p.Info(facts)
 		st.Findings = p.Findings(facts, "overview")
+		if st.Net != nil {
+			st.Net.SystemHotspot = p.OwnHotspotState(facts)
+		}
 	}
 	for _, c := range raw.Compatible {
 		if strings.HasPrefix(c, "arduino,imola") {

@@ -1,0 +1,5 @@
+{
+  "packages": [
+    {"name": "arduino", "platforms": [{"architecture": "zephyr", "version": "1.0.0"}]}
+  ]
+}
