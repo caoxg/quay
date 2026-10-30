@@ -19,11 +19,11 @@ import (
 type FetchOptions struct {
 	Repo   string // git URL / owner/repo; empty when Dir is set
 	Ref    string // branch, tag or commit; empty = default branch
+	Subdir string // app folder inside the repo
+	Dir    string // deploy a local folder instead
 	// Commit is a commit of Ref to take instead of its tip (an earlier version, or the one the
 	// user looked at). The bundle still names Ref, so later updates follow that branch.
 	Commit string
-	Subdir string // app folder inside the repo
-	Dir    string // deploy a local folder instead
 }
 
 // Fetch prepares a bundle on this computer (no board needed).

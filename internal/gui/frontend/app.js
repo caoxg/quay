@@ -489,7 +489,7 @@ function appCard(a, d) {
         : `<span class="t">${esc(repoLabel(dep.repo))}</span>`}<span>@</span><code>${esc(dep.ref || '')}</code>${dep.commit ? `<code${repoWeb(dep.repo) ? ` class="click" data-act="open-web" data-url="${esc(repoWeb(dep.repo) + '/commit/' + dep.commit)}" title="${esc(dep.commit)}"` : ''}>${esc(short(dep.commit))}${dep.dirty ? '*' : ''}</code>` : ''}</div>`)
       + `<div class="row">${icon('clock', 'sm')}<span class="t">${esc(dep.subject || '')}${dep.subject ? ' · ' : ''}${esc(t('deployed', { when: when(dep.deployedAt) }))}</span>${upd && !upd.behind ? `<span class="latest">${icon('check', 'sm')}${t('isLatest')}</span>` : ''}</div>`
       + (upd?.behind ? `<div class="row upd" data-act="whats-new" data-folder="${esc(a.folder)}" title="${esc(t('whatsNewHint'))}"><span class="reddot"></span><span class="t"><b>${esc(upd.commits > 0 ? t('newCommits', { n: upd.commits }) : t('updateAvailable'))}</b> <code>${esc(short(upd.latest))}</code> ${esc(upd.subject || '')}${upd.date ? ' · ' + esc(when(upd.date)) : ''}</span></div>` : '')
-    : `<div class="row">${icon('info', 'sm')}<span class="t">${t('notByQuay')}</span></div>`
+    : `<div class="row"${a.match ? ` title="${esc(t('plainAppHint', { name: a.match.name }))}"` : ''}>${icon('info', 'sm')}<span class="t">${t('notByQuay')}${a.match ? ' · ' + esc(t('plainApp')) : ''}</span></div>`
       + (upd?.unknown ? `<div class="row" title="${esc(upd.repo)}">${icon('branch', 'sm')}<span class="t">${t('latestOnGitHub')} <code>${esc(short(upd.latest))}</code> ${esc(upd.subject || '')}${upd.date ? ' · ' + esc(when(upd.date)) : ''}</span></div>` : '');
   // Not while an install or update runs: those apply the setup themselves when asked to.
   const setup = !op && p?.system && a.systemReady === false
@@ -2203,7 +2203,7 @@ const act = {
   },
   takeover: ({ folder }) => {
     const a = appByFolder(folder), upd = S.updates[S.cur]?.[folder];
-    const cat = (S.info?.catalog || []).find((p) => p.id === a?.profile?.id);
+    const cat = (S.info?.catalog || []).find((p) => p.id === a?.match?.id);
     openInstall(cat ? { cat: cat.id, folder } : { tab: 'git', repo: upd?.repo, folder });
   },
   'pol-tab': ({ tab }) => { topModal().data.tab = tab; invalidate('modal'); },

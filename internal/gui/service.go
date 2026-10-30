@@ -1613,8 +1613,8 @@ func (s *Service) CheckUpdates(apps []core.App) string {
 			switch {
 			case a.Deploy != nil && a.Deploy.Repo != "" && !strings.HasPrefix(a.Deploy.Repo, "local:"):
 				u.Repo, u.Ref = a.Deploy.Repo, a.Deploy.Ref
-			case a.Deploy == nil && a.Profile != nil && a.Profile.Source != nil && a.Profile.Source.Repo != "":
-				u.Repo, u.Ref, u.Unknown = a.Profile.Source.Repo, a.Profile.Source.Ref, true
+			case a.Deploy == nil && a.Match != nil && a.Match.Source != nil && a.Match.Source.Repo != "":
+				u.Repo, u.Ref, u.Unknown = a.Match.Source.Repo, a.Match.Source.Ref, true
 			default:
 				continue
 			}

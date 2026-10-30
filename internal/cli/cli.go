@@ -627,6 +627,8 @@ func printStatus(st *core.Status) {
 				p += yellow("  — system setup needed: quay prepare " + a.Folder)
 			}
 			fmt.Printf("     %s\n", dim(p))
+		} else if a.Match != nil {
+			fmt.Printf("     %s\n", dim("not installed by Quay: a plain app here; deploy it with Quay to use the "+a.Match.Name+" profile"))
 		}
 		if len(a.Data) > 0 {
 			fmt.Printf("     %s %s\n", dim("data/"), strings.Join(a.Data, " "))

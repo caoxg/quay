@@ -91,6 +91,9 @@ duckProfile.policies = {
 };
 mockState.apps[0].profile = duckProfile;
 mockState.apps[0].policies = {};
+// ?ducksetup: the duck was installed by another tool (Duck Setup): no Quay record, so a plain app with
+// only a matching profile (core.App.Match).
+if (new URLSearchParams(location.search).has('ducksetup')) Object.assign(mockState.apps[0], { deploy: undefined, profile: null, match: duckProfile, systemReady: null });
 const MOCK_POLICIES = [
   { id: 'walk-luwu-2026-09', app: 'xgoduck', slot: 'walk', name: 'Walk (runtime of 2026-09-22)', nameZh: '行走（2026-09-22 版运行时）', author: 'Luwu Dynamics',
     description: 'The walking model the runtime shipped until 2026-10-22.', descriptionZh: '运行时在 2026-10-22 之前自带的行走模型。', url: 'https://raw.githubusercontent.com/…/xgoduck_walk.onnx',
@@ -325,7 +328,7 @@ const mock = {
     ['start', 'Start the app', ['Starting app XGO Duck…', 'Building sketch (cached)', 'App started'], 1300],
   ], { folder: req.folder, commit: '466512e9426f61fb07d9be9b3f20df0171692150', previous: '9dc36787bc61b102c2da0f97c9c758e639e90ab8', needsSetup: true }, {
     warn: 'one-time system setup for XGO-Duck is not done yet: run Prepare (it needs sudo) before the app can work',
-    after: () => { const a = mockState.apps[0]; a.deploy.commit = '466512e9426f61fb07d9be9b3f20df0171692150'; a.deploy.subject = 'Update XGO Duck runtime and servo protection setup'; a.deploy.deployedAt = new Date().toISOString(); a.status = 'running'; },
+    after: () => { const a = mockState.apps[0]; if (!a.deploy) Object.assign(a, { deploy: { repo: 'https://github.com/LuwuDynamics/xgoduck_runtime_arduino', ref: 'master', profile: 'xgoduck', quay: 'dev', commitDate: '2026-10-22T08:00:00Z' }, profile: duckProfile, match: null, systemReady: false }); a.deploy.commit = '466512e9426f61fb07d9be9b3f20df0171692150'; a.deploy.subject = 'Update XGO Duck runtime and servo protection setup'; a.deploy.deployedAt = new Date().toISOString(); a.status = 'running'; },
   }),
   Update: (b, f) => mock.Deploy({ board: b, folder: f }),
   // What updating would change. The duck's master is a line of commits (the installed one in the
@@ -353,7 +356,7 @@ const mock = {
   }),
   Start: (b, f) => simulate('start', b, f, [['start', 'Start', ['App started'], 900]], null, { after: () => { mockState.apps.find((a) => a.folder === f).status = 'running'; } }),
   // The mock duck holds torque while running, so stopping it needs force (like the real safety probe).
-  Stop: (b, f, force) => simulate('stop', b, f, !force && f === 'xgoduck_runtime_arduino'
+  Stop: (b, f, force) => simulate('stop', b, f, !force && f === 'xgoduck_runtime_arduino' && mockState.apps[0].profile
     ? [['safety', 'Check it is safe to stop', [], 450, 'fail', "The servos are powered (torque on). Turn torque off in the duck's web UI or put the duck down first.", true]]
     : [['safety', 'Check it is safe to stop', [], 450, force ? 'skip' : 'ok'], ['stop', 'Stop', ['App stopped'], 700]], null, { after: () => { mockState.apps.find((a) => a.folder === f).status = 'stopped'; } }),
   Restart: (b, f) => simulate('restart', b, f, [['stop', 'Stop'], ['start', 'Start', [], 900]]),
@@ -533,9 +536,9 @@ const mock = {
     after: () => { const p = { ...mockState.apps[0].policies }; (slots.length ? slots : Object.keys(p)).forEach((k) => delete p[k]); mockState.apps[0].policies = p; } }),
   PickPolicyFile: () => '/Users/me/Downloads/model_5500.onnx',
   SetPolicyIndexes: (urls) => { mockState.policyIndexes = urls; },
-  CheckUpdates: (apps) => simulate('check-updates', '', '', [], apps.filter((a) => a.deploy || a.profile?.source).map((a) => {
+  CheckUpdates: (apps) => simulate('check-updates', '', '', [], apps.filter((a) => a.deploy || a.match?.source).map((a) => {
     const latest = a.folder.startsWith('xgo') ? '8837d5a3bc7cf3746f6da2b55c7b9191026b9838' : a.deploy.commit;
-    const u = { folder: a.folder, repo: a.deploy?.repo || a.profile.source.repo, latest, commits: -1, unknown: !a.deploy,
+    const u = { folder: a.folder, repo: a.deploy?.repo || a.match.source.repo, latest, commits: -1, unknown: !a.deploy,
       subject: a.folder.startsWith('xgo') ? 'Add roller walking controls and simplify the user guide' : a.deploy?.subject, date: '2026-10-23T10:14:19Z' };
     if (a.deploy) { u.behind = a.deploy.commit !== latest; u.commits = u.behind ? 3 : 0; }
     return u;

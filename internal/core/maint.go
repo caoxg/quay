@@ -45,6 +45,9 @@ func (s *Session) Prepare(ctx context.Context, sink Sink, key string, revert, fo
 	if err != nil {
 		return err
 	}
+	if !a.ByQuay() && a.Match != nil {
+		return fmt.Errorf("%s was not installed by Quay, so Quay does not use the %s profile on it: whatever installed it may have set the board up its own way. Reinstall it with Quay first", a.Name, a.Match.Name)
+	}
 	if a.Profile == nil || a.Profile.System == nil {
 		return fmt.Errorf("%s declares no system setup", a.Name)
 	}

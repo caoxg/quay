@@ -364,6 +364,37 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
+	// The GUI's update installs the commit the user looked at and records it under its branch.
+	t.Run("update to a chosen commit of a branch", func(t *testing.T) {
+		res, err := s.Update(ctx, sink, cache, folder, "master", core.DeployOptions{Backup: true, BackupDir: backups, Commit: "466512e"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(res.Commit, "466512e") {
+			t.Fatalf("commit: %+v", res)
+		}
+		st, _ := s.Status(ctx)
+		a, err := st.App(folder)
+		if err != nil || a.Deploy == nil || a.Deploy.Ref != "master" || !strings.HasPrefix(a.Deploy.Commit, "466512e") {
+			t.Fatalf("record: %+v %v", a.Deploy, err)
+		}
+	})
+
+	// Installed some other way (no Quay record): a plain app. The profile it matches only names
+	// where a reinstall would come from; Quay neither checks nor applies its system setup.
+	t.Run("no profile on an app Quay did not install", func(t *testing.T) {
+		sh(t, "mv "+appDir+"/.quay.json /tmp/quay.json.saved")
+		defer sh(t, "mv /tmp/quay.json.saved "+appDir+"/.quay.json")
+		st, _ := s.Status(ctx)
+		a, err := st.App(folder)
+		if err != nil || a.Deploy != nil || a.Profile != nil || a.Match == nil || a.Match.ID != "xgoduck" || a.SystemReady != nil {
+			t.Fatalf("app: deploy=%v profile=%v match=%v ready=%v %v", a.Deploy, a.Profile != nil, a.Match != nil, a.SystemReady, err)
+		}
+		if err := s.Prepare(ctx, sink, folder, false, false); err == nil || !strings.Contains(err.Error(), "not installed by Quay") {
+			t.Fatalf("prepare: %v", err)
+		}
+	})
+
 	t.Run("restore", func(t *testing.T) {
 		sh(t, "echo '{\"broken\": true}' > "+appDir+"/data/zero_pos.json")
 		if err := s.Restore(ctx, sink, folder, backup, false); err != nil {

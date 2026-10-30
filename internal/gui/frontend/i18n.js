@@ -20,7 +20,7 @@ const en = {
   // statuses
   st_running: 'Running', st_stopped: 'Stopped', st_starting: 'Starting', st_stopping: 'Stopping', st_failed: 'Failed', st_uninitialized: 'Never run',
   runsAtBoot: 'Runs at boot', updateAvailable: 'Update available', upToDate: 'Up to date', setupNeeded: 'Setup needed', setupDone: 'System ready',
-  profileChip: '{name} profile', dataFiles: '{n} data file(s)', notByQuay: 'Not installed by Quay', localFolder: 'Local folder',
+  profileChip: '{name} profile', dataFiles: '{n} data file(s)', notByQuay: 'Not installed by Quay', plainApp: 'treated as a plain app', plainAppHint: 'It may be another version of the app, set up its own way, so Quay uses nothing from the {name} profile on it (icon, shortcuts, the check before stopping, system setup, policies). Reinstalling it with Quay hands it over.', localFolder: 'Local folder',
   deployed: 'deployed {when}', committed: '{when}',
   setupCallout: 'One more step before {name} can run: {what}',
   applySetup: 'Set up now',
@@ -253,7 +253,7 @@ const zh = {
   noAppCLI: '没有找到 arduino-app-cli。Quay 需要 Arduino UNO Q 的原装系统。',
   st_running: '运行中', st_stopped: '已停止', st_starting: '启动中', st_stopping: '停止中', st_failed: '启动失败', st_uninitialized: '从未运行',
   runsAtBoot: '开机自启', updateAvailable: '有新版本', upToDate: '已是最新', setupNeeded: '需要系统设置', setupDone: '系统已就绪',
-  profileChip: '{name} 配置', dataFiles: '{n} 个数据文件', notByQuay: '不是用 Quay 安装的', localFolder: '本地文件夹',
+  profileChip: '{name} 配置', dataFiles: '{n} 个数据文件', notByQuay: '不是用 Quay 安装的', plainApp: '按普通 App 对待', plainAppHint: '它可能是另一个版本，也可能被装它的工具用自己的方式设置过，所以 Quay 不对它用 {name} 配置里的任何东西（图标、快捷入口、停止前检查、系统设置、策略）。用 Quay 重装后才会用。', localFolder: '本地文件夹',
   deployed: '{when}部署', committed: '{when}',
   setupCallout: '{name} 还差一步系统设置才能运行：{what}',
   applySetup: '现在设置',

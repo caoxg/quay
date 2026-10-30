@@ -94,13 +94,22 @@ type App struct {
 	Default     bool             `json:"default"`
 	Deploy      *Deployment      `json:"deploy,omitempty"`
 	Data        []string         `json:"data"`
-	Profile     *profile.Profile `json:"profile,omitempty"`
+	Profile     *profile.Profile `json:"profile,omitempty"` // only on apps Quay installed (see ByQuay)
+	// Match is the profile an app Quay did not install matches (by app name or repository). Quay
+	// uses none of it on the app; it only names where reinstalling through Quay would come from.
+	Match       *profile.Profile `json:"match,omitempty"`
 	SystemReady *bool            `json:"systemReady,omitempty"`
 	Ports       []int            `json:"ports,omitempty"`  // app.yaml ports
 	WebURL      string           `json:"webUrl,omitempty"` // the app's own console (profile web, else first port)
 	// Policies are the models Quay installed in place of the stock ones, by slot.
 	Policies map[string]InstalledPolicy `json:"policies,omitempty"`
 }
+
+// ByQuay says Quay installed the app. Only then does it use a profile for it. An app installed
+// some other way may be another version of the app, set up its own way, so for Quay it is a plain
+// app: no profile icon, console, shortcuts, safety check, setup, hooks or policies, only what any
+// app gets. Reinstalling it through Quay hands it over.
+func (a *App) ByQuay() bool { return a.Deploy != nil }
 
 type BrokenApp struct {
 	Name  string `json:"name"`
@@ -282,9 +291,13 @@ func (s *Session) Status(ctx context.Context) (*Status, error) {
 			repo = a.Deploy.Repo
 		}
 		if p, err := profile.Lookup([]byte(f.QuayYAML), repo, ay.Name); err == nil && p != nil {
-			a.Profile = p
-			if p.System != nil && strings.TrimSpace(p.System.Check) != "" {
-				checks = append(checks, f.Folder+"\t"+strings.ReplaceAll(p.System.Check, "\n", " ; "))
+			if !a.ByQuay() {
+				a.Match = p
+			} else {
+				a.Profile = p
+				if p.System != nil && strings.TrimSpace(p.System.Check) != "" {
+					checks = append(checks, f.Folder+"\t"+strings.ReplaceAll(p.System.Check, "\n", " ; "))
+				}
 			}
 		}
 		a.WebURL = consoleURL(host, a.Profile, a.Ports)

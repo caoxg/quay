@@ -47,7 +47,7 @@ See what the board's update would install and how much it downloads, before anyt
 
 ### Apps that follow GitHub
 
-Install from any repository, branch or tag. Quay remembers where each app came from. When the branch moves on, the card says how many commits are new and what the latest one is, with a red dot on Update. Clicking any of these first lists the commits the update brings (author, date); the update runs only when you confirm it. "Change version…" in the app's menu also lists the branch's recent commits, to go back to an earlier one. Updating keeps `data/` (calibration, settings) and backs it up first. Apps installed some other way show GitHub's latest commit too, and one click reinstalls them through Quay.
+Install from any repository, branch or tag. Quay remembers where each app came from. When the branch moves on, the card says how many commits are new and what the latest one is, with a red dot on Update. Clicking any of these first lists the commits the update brings (author, date); the update runs only when you confirm it. "Change version…" in the app's menu also lists the branch's recent commits, to go back to an earlier one. Updating keeps `data/` (calibration, settings) and backs it up first. Apps installed some other way show GitHub's latest commit too, and one click reinstalls them through Quay. Until then Quay treats them as plain apps and uses nothing from a profile on them (icon, shortcuts, safety check, system setup, policies): they may be another version, set up their own way.
 
 <p align="center"><img src="docs/images/app-update-en.png" alt="An app card: installed commit, three new commits on GitHub, and a red dot on Update" width="520"></p>
 
