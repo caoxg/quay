@@ -70,7 +70,7 @@ func TestScriptAndActions(t *testing.T) {
 		t.Fatal("an action URL must be a path or http(s)")
 	}
 	d := ByID("xgoduck")
-	if d.Uninstall == nil || d.Uninstall.Run == "" || len(d.Actions) != 2 || d.BeforeStart.DescriptionZH == "" {
+	if d.Uninstall == nil || d.Uninstall.Run == "" || len(d.Actions) != 3 || d.Actions[0].URL != "http://{host}/" || d.BeforeStart.DescriptionZH == "" {
 		t.Fatalf("duck profile: %+v", d)
 	}
 }
@@ -122,7 +122,8 @@ func TestPick(t *testing.T) {
 }
 
 // The built-in XGO-Duck profile follows the runtime's models: 3, then roulade, roller, and sit and
-// the two kicks.
+// the two kicks. From 0ba5cdc (the AI app merged into master) the system setup is the runtime's
+// install-ai-support.sh as well as the 2 Mbps router link.
 func TestXGODuckVersions(t *testing.T) {
 	vs := versions("https://github.com/LuwuDynamics/xgoduck_runtime_arduino", "")
 	var slots []int
@@ -132,15 +133,62 @@ func TestXGODuckVersions(t *testing.T) {
 		}
 		slots = append(slots, len(v.Policies.Slots))
 	}
-	if fmt.Sprint(slots) != "[3 4 5 8]" {
+	if fmt.Sprint(slots) != "[3 4 5 8 8]" {
 		t.Fatalf("slots per version: %v", slots)
 	}
-	if ByID("xgoduck") != vs[3] || len(Latest()) != 1 {
+	if ByID("xgoduck") != vs[4] || len(Latest()) != 1 {
 		t.Fatal("ByID and Latest give the newest version")
 	}
+	// at says which versions' from are at or before the app's commit.
+	at := func(n int) At {
+		return At{Ancestor: func(from string) (bool, error) {
+			for _, v := range vs[n:] {
+				if from == v.From {
+					return false, nil
+				}
+			}
+			return true, nil
+		}}
+	}
 	// 8837d5a (roller added) is at or after the third version's from and before the fourth's.
-	at := At{Ancestor: func(from string) (bool, error) { return from != vs[3].From, nil }}
-	if p, _ := Lookup(nil, "https://github.com/LuwuDynamics/xgoduck_runtime_arduino", "", at); p != vs[2] || p.Policies.Slot("roller") == nil {
+	if p, _ := Lookup(nil, "https://github.com/LuwuDynamics/xgoduck_runtime_arduino", "", at(3)); p != vs[2] || p.Policies.Slot("roller") == nil {
 		t.Fatalf("picked %+v", p)
+	}
+	// 4ce3315 (V1.0, before the AI merge): only the router link.
+	if p, _ := Lookup(nil, "https://github.com/LuwuDynamics/xgoduck_runtime_arduino", "", at(4)); p != vs[3] || strings.Contains(p.System.Apply, "install-ai-support") {
+		t.Fatalf("picked %+v", p)
+	}
+	// After the merge: the AI setup, which the app named XGO Duck AI also matches.
+	if p, _ := Lookup(nil, "", "XGO Duck AI", at(5)); p != vs[4] || !strings.Contains(p.System.Apply, "install-ai-support.sh") ||
+		!strings.Contains(p.System.Apply, "router-2m.sh") || p.Health.Timeout != 600 {
+		t.Fatalf("picked %+v", p)
+	}
+}
+
+func TestExclude(t *testing.T) {
+	p, err := Parse([]byte("exclude: [assembly/, packages/, '*.pdf', 'docs/*.png', notes]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{
+		"assembly/deck.pptx": true, "assembly": false, // a folder pattern does not match a file
+		"packages/a/b.zip": true, "a.pdf": true, "docs/a.pdf": false, "docs/a.png": true,
+		"docs/i/a.png": false, "notes": true, "notes/x.txt": true, "python/main.py": false, "app.yaml": false,
+	} {
+		if got := p.Excludes(name); got != want {
+			t.Errorf("Excludes(%q) = %v", name, got)
+		}
+	}
+	for _, bad := range []string{"/etc", "../x", "a/../b", "[", "*.yaml", "python/", "*", ""} {
+		if _, err := Parse([]byte("exclude: ['" + bad + "']\n")); err == nil {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
+	if (*Profile)(nil).Excludes("x") {
+		t.Error("no profile, nothing left out")
+	}
+	d := ByID("xgoduck")
+	if !d.Excludes("assembly/xgo-duck-assembly-zh-en-20261016.pptx") || !d.Excludes("packages/xgoduck_ai.zip") || d.Excludes("tools/install-ai-support.sh") {
+		t.Fatalf("duck exclude: %v", d.Exclude)
 	}
 }

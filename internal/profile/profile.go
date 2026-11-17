@@ -38,6 +38,11 @@ type Profile struct {
 	Source *Source `yaml:"source" json:"source,omitempty"`
 	// Match lets a built-in profile recognise a repository or an installed app.
 	Match Match `yaml:"match" json:"-"`
+	// Exclude lists paths in the app (from its root) that Quay does not upload to the board: files
+	// in the repository the app does not run, such as manuals, slide decks or release archives. A
+	// pattern (path.Match: * and ? stay within one folder) leaves out the files and folders it
+	// matches, and everything in those folders; one that ends in / matches only folders.
+	Exclude []string `yaml:"exclude" json:"exclude,omitempty"`
 
 	System      *System      `yaml:"system" json:"system,omitempty"`
 	BeforeStart *BeforeStart `yaml:"before_start" json:"beforeStart,omitempty"`
@@ -258,10 +263,64 @@ func Parse(b []byte) (*Profile, error) {
 			return nil, fmt.Errorf("%s: %w", FileName, err)
 		}
 	}
+	if err := checkExclude(p.Exclude); err != nil {
+		return nil, fmt.Errorf("%s: %w", FileName, err)
+	}
 	if p.Health != nil && p.Health.Timeout <= 0 {
 		p.Health.Timeout = 120
 	}
 	return &p, nil
+}
+
+// kept are the files an app cannot do without (or Quay needs from it); exclude may not leave them out.
+var kept = []string{"app.yaml", FileName, "python/main.py"}
+
+func checkExclude(patterns []string) error {
+	for _, e := range patterns {
+		p := strings.TrimSuffix(e, "/")
+		if p == "" || p != path.Clean(p) || path.IsAbs(p) || p == ".." || strings.HasPrefix(p, "../") {
+			return fmt.Errorf("exclude: %q must be a path inside the app, like docs/ or *.pdf", e)
+		}
+		if _, err := path.Match(p, ""); err != nil {
+			return fmt.Errorf("exclude: %q is not a valid pattern", e)
+		}
+		for _, k := range kept {
+			if excludes(e, k) {
+				return fmt.Errorf("exclude: %q would leave out %s", e, k)
+			}
+		}
+	}
+	return nil
+}
+
+// Excludes reports whether the profile's exclude leaves out a file of the app (a slash-separated
+// path from the app root). A nil profile excludes nothing.
+func (p *Profile) Excludes(name string) bool {
+	if p == nil {
+		return false
+	}
+	for _, e := range p.Exclude {
+		if excludes(e, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// excludes matches a pattern against a file's path and the folders it is in.
+func excludes(pattern, name string) bool {
+	dirOnly := strings.HasSuffix(pattern, "/")
+	pattern = strings.TrimSuffix(pattern, "/")
+	parts := strings.Split(name, "/")
+	for i := 1; i <= len(parts); i++ {
+		if i == len(parts) && dirOnly {
+			break
+		}
+		if ok, _ := path.Match(pattern, strings.Join(parts[:i], "/")); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // MaxIconSVG bounds an inline SVG icon; an icon needs a few KB.

@@ -87,3 +87,36 @@ func TestAncestry(t *testing.T) {
 		t.Error("no cache: no history")
 	}
 }
+
+func TestWithout(t *testing.T) {
+	app := t.TempDir()
+	for name, size := range map[string]int{"app.yaml": 12, "python/main.py": 1, "assembly/deck.pptx": 5000, "packages/app.zip": 3000, "docs/a.md": 7} {
+		os.MkdirAll(filepath.Join(app, filepath.Dir(name)), 0o755)
+		data := []byte(strings.Repeat("x", size))
+		if name == "app.yaml" {
+			data = []byte("name: Demo\n#2345\n")[:size]
+		}
+		os.WriteFile(filepath.Join(app, name), data, 0o644)
+	}
+	b, err := FromDir(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skip := func(n string) bool {
+		return n == "app.yaml" || strings.HasPrefix(n, "assembly/") || strings.HasPrefix(n, "packages/")
+	}
+	c, err := b.Without(skip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Files != 3 || c.LeftOut != 2 || c.LeftOutBytes != 8000 || b.Files != 5 || b.LeftOut != 0 {
+		t.Fatalf("files %d, left out %d (%d B); the original has %d", c.Files, c.LeftOut, c.LeftOutBytes, b.Files)
+	}
+	if len(c.Tar) >= len(b.Tar)-8000 || validate(c) != nil {
+		t.Fatalf("tar %d → %d bytes, or no longer an app", len(b.Tar), len(c.Tar))
+	}
+	// Leaving out again what is already out changes nothing.
+	if d, err := c.Without(skip); err != nil || d.LeftOut != 2 || d.Files != 3 {
+		t.Fatalf("again: %+v %v", d, err)
+	}
+}

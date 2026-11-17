@@ -100,6 +100,12 @@ func (s *Session) Deploy(ctx context.Context, sink Sink, b *source.Bundle, opt D
 	if err != nil {
 		return nil, err
 	}
+	if b, err = Trim(b, prof); err != nil {
+		return nil, err
+	}
+	if b.LeftOut > 0 {
+		o.info(fmt.Sprintf("not uploading %d files (%s) the %s profile leaves out: %s", b.LeftOut, human(int(b.LeftOutBytes)), prof.Name, strings.Join(prof.Exclude, ", ")), nil)
+	}
 	folder := opt.Folder
 	if folder == "" && prof != nil && prof.Folder != "" {
 		folder = prof.Folder
@@ -259,6 +265,15 @@ func (s *Session) Deploy(ctx context.Context, sink Sink, b *source.Bundle, opt D
 		}
 	}
 	return res, nil
+}
+
+// Trim leaves out of the bundle the files the app's profile excludes (see profile.Profile.Exclude).
+// Trimming a bundle twice changes nothing more.
+func Trim(b *source.Bundle, p *profile.Profile) (*source.Bundle, error) {
+	if p == nil || len(p.Exclude) == 0 {
+		return b, nil
+	}
+	return b.Without(p.Excludes)
 }
 
 // Update redeploys an installed app from the repository recorded at install time.

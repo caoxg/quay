@@ -544,6 +544,7 @@ function hooks(p) {
   const out = [];
   if (p.system) out.push({ icon: 'alert', title: t('hk_system'), text: z(p.system) });
   if (p.beforeStart) out.push({ icon: 'sliders', title: t('hk_before'), text: z(p.beforeStart) || t('hk_beforeRun', { run: p.beforeStart.run }) });
+  if (p.exclude?.length) out.push({ icon: 'upload', title: t('hk_exclude'), text: t('hk_excludeText', { list: p.exclude.join(lang() === 'zh' ? '、' : ', ') }) });
   if (p.health) out.push({ icon: 'activity', title: t('hk_health'), text: t('hk_healthText', { url: p.health.url, n: p.health.timeout }) });
   if (p.safety) out.push({ icon: 'shield', title: t('hk_safety'), text: t('hk_safetyText', { msg: p.safety.message || p.safety.field }) });
   if (p.web) out.push({ icon: 'globe', title: t('hk_web'), text: t('hk_webText', { port: p.web.port }) });
@@ -881,7 +882,7 @@ modalViews.install = (d) => {
       <div class="top">${appIcon(p, b.app.icon)}<div style="min-width:0;flex:1"><b style="font-size:14px">${esc(b.app.name)}</b><div style="color:var(--text-2);font-size:12px;margin-top:2px">${esc(b.app.description || '')}</div></div></div>
       <dl class="facts">
         <dt>${t('ref')}</dt><dd><code>${esc(b.ref)}</code> · <code>${esc(short(b.commit))}</code>${b.dirty ? ` <span class="pill warn">${t('dirtyWarn')}</span>` : ''} ${esc(b.subject || '')}</dd>
-        <dt>${t('files')}</dt><dd>${b.files} · ${esc(when(b.date))}</dd>
+        <dt>${t('files')}</dt><dd>${b.files}${b.leftOut ? ` <span style="color:var(--muted)">${esc(t('leftOut', { n: b.leftOut, size: kb(b.leftOutBytes) }))}</span>` : ''} · ${esc(when(b.date))}</dd>
         <dt>${icon('shield', 'sm')}</dt><dd>${p ? `${esc(t('profileFound', { name: p.name }))} · <span style="color:var(--muted)">${p.origin === 'repo' ? t('profileRepo') : t('profileBuiltin')}</span>` : `<span style="color:var(--muted)">${t('noProfile')}</span>`}</dd>
         ${p?.system ? `<dt>${icon('alert', 'sm')}</dt><dd style="white-space:normal;color:var(--warn)">${t('needsSystem')}: ${esc(firstSentence(zhOr(p.system.description, p.system.descriptionZh)))}</dd>` : ''}
       </dl>

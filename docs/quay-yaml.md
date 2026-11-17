@@ -12,6 +12,7 @@ name: Weather Station           # display name of the profile
 description: BME280 charts in the browser.
 icon: 🌦️                        # an emoji, or inline <svg> markup (see below)
 folder: weather_station         # default install folder under ~/ArduinoApps
+exclude: [docs/, '*.pptx']      # files in the repository Quay does not upload
 
 system:
   description: Enables I²C bus 2 for the Qwiic connector. Needs a reboot to take effect.
@@ -69,13 +70,13 @@ A built-in profile can come in versions, one per commit of the app it starts fro
 
 | Hook | Runs as | Working directory | When |
 |---|---|---|---|
-| `system.check` | login user | home | on `status`, after deploy, before and after `prepare` |
+| `system.check` | login user | app folder | on `status`, after deploy, before and after `prepare` |
 | `system.apply` | root (`sudo`) | app folder | `quay prepare APP` |
 | `system.revert` | root (`sudo`) | app folder | `quay prepare APP --revert`, `quay erase APP --revert-system` |
 | `before_start.run` | login user | app folder | after every deploy or update, before the app starts |
 | `uninstall` | login user | app folder | `quay erase APP`, before the folder is deleted |
 
-Each hook is a bash script (`bash -c`). It can span several lines with YAML's `|` block. `HOME` is the login user's home (usually `/home/arduino`). A non-zero exit fails the step and is shown with the hook's output.
+Each hook is a bash script (`bash -c`). It can span several lines with YAML's `|` block. Bash runs it without `-e`, so the script's exit status is its last command's: start it with `set -e` when every line must succeed. `system.check` is the exception: Quay joins its lines with ` ; `, so each line must be a whole command. `HOME` is the login user's home (usually `/home/arduino`). A non-zero exit fails the step and is shown with the hook's output.
 
 For `sudo`, Quay tries passwordless sudo first, then the SSH login password, then asks the user. The script is uploaded to a temporary file and runs with `sudo bash FILE`, so it never appears in the process list with its contents.
 
@@ -93,6 +94,19 @@ icon: |
 ```
 
 The SVG is drawn as an image (scripts and external references in it are ignored) and may be up to 16 KB. Use a square `viewBox`; Quay draws it at about 36 px, so keep it simple.
+
+### `exclude`
+
+Files in the app's repository that the app does not run, such as manuals, slide decks, release archives or test data, which Quay leaves out of every install and update. They are not uploaded, and after an update they are not on the board.
+
+```yaml
+exclude:
+  - assembly/        # a folder (a trailing / matches folders only)
+  - packages/
+  - '*.pdf'          # quote patterns that start with *
+```
+
+Each entry is a path from the app's root, with `*`, `?` and `[…]` as in `path.Match`: a `*` does not cross a `/`, so `*.pdf` matches PDFs at the top only, and `docs/*.pdf` those in `docs/`. An entry leaves out the files and folders it matches and everything in those folders. `app.yaml`, `quay.yaml` and `python/main.py` cannot be left out. The install preview counts the files left out.
 
 ### `system`
 

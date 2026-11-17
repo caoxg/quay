@@ -32,7 +32,8 @@ var (
 
 // Schema is the newest repository layout this Quay reads. 2: an app profile can come in versions
 // (several files with one id, oldest first, each with the first app commit it is for in from).
-const Schema = 2
+// 3: an app profile can name files Quay does not upload (exclude).
+const Schema = 3
 
 // Index is index.yaml at the top of the repository.
 type Index struct {

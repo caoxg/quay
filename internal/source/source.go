@@ -46,7 +46,47 @@ type Bundle struct {
 	Folder   string    `json:"folder"`           // suggested folder name under ~/ArduinoApps
 	Files    int       `json:"files"`
 	Tar      []byte    `json:"-"`
-	history  string    // the git repository it came from, for Ancestor
+	// LeftOut and LeftOutBytes count the files Without took out (they are not uploaded).
+	LeftOut      int    `json:"leftOut,omitempty"`
+	LeftOutBytes int64  `json:"leftOutBytes,omitempty"`
+	history      string // the git repository it came from, for Ancestor
+}
+
+// Without returns a copy of the bundle without the files skip says yes to (slash-separated paths
+// from the app root). app.yaml and quay.yaml always stay. The copy counts what it left out in
+// LeftOut and LeftOutBytes, on top of what b had already left out.
+func (b *Bundle) Without(skip func(name string) bool) (*Bundle, error) {
+	out := *b
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	tr := tar.NewReader(bytes.NewReader(b.Tar))
+	out.Files = 0
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if h.Name != "app.yaml" && h.Name != "quay.yaml" && skip(h.Name) {
+			out.LeftOut++
+			out.LeftOutBytes += h.Size
+			continue
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			return nil, err
+		}
+		if _, err := io.Copy(tw, tr); err != nil {
+			return nil, err
+		}
+		out.Files++
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	out.Tar = buf.Bytes()
+	return &out, nil
 }
 
 // Ancestor tells whether from is the bundle's commit or one of its ancestors (see Ancestry).

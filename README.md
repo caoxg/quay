@@ -26,10 +26,11 @@ Boards in China often crawl through updates and Python installs. **China mirrors
 ### Custom apps: what an app needs, done for it
 
 Apps in the **Custom** tab come with a Quay profile (their own [`quay.yaml`](docs/quay-yaml.md), or one built into Quay). It tells Quay what the app needs beyond a plain install, and the install preview lists each step:
+- files in the repository that are not uploaded;
 - one-time system setup;
 - a step before every start;
 - start and safety checks;
-- the web console and shortcuts to its pages (for XGO-Duck: Calibration and Servo setup);
+- the web console and shortcuts to its pages (for XGO-Duck: Cockpit, Calibration and Servo setup);
 - policy slots;
 - clean-up on erase.
 

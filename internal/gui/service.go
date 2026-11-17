@@ -1343,6 +1343,10 @@ func (s *Service) Inspect(req InspectRequest) string {
 		if err != nil {
 			return nil, err
 		}
+		// The preview counts what is uploaded (Deploy trims again, which changes nothing).
+		if b, err = core.Trim(b, p); err != nil {
+			return nil, err
+		}
 		folder := b.Folder
 		if p != nil && p.Folder != "" {
 			folder = p.Folder

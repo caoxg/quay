@@ -2,13 +2,15 @@
 # ship a quay.yaml, and system profiles for board systems other than the stock image. Quay keeps
 # this copy and uses the repository's when it is newer (`updated`).
 # Schema 2: an app profile can come in versions, one file per first commit of the app it is for
-# (`from`), listed oldest first. Quay before 0.2.3 reads only schema 1 and keeps its own copy.
-schema: 2
-updated: "2026-10-31"
+# (`from`), listed oldest first. Schema 3: an app profile can name files Quay does not upload
+# (`exclude`). Quay reads the schemas up to its own (0.2.3: 2, 0.2.4: 3) and otherwise keeps its copy.
+schema: 3
+updated: "2026-11-17"
 apps:
   - apps/xgoduck/5f1954a.yaml
   - apps/xgoduck/8cdbbd8.yaml
   - apps/xgoduck/8837d5a.yaml
   - apps/xgoduck/5f511b9.yaml
+  - apps/xgoduck/0ba5cdc.yaml
 systems:
   - systems/duck-os.yaml
